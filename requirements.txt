@@ -1,0 +1,39 @@
+# ==============================================================================
+# DocMind AI Backend Dependencies
+# ==============================================================================
+# Essential dependencies required for FastAPI backend, PDF Upload, Processing, Chunking,
+# local vector embedding generation, fast local similarity search index, and AI chat.
+# ==============================================================================
+
+# Fast, high-performance web framework for building APIs
+fastapi>=0.110.0,<0.112.0
+
+# Lightning-fast ASGI server implementation for running FastAPI
+uvicorn[standard]>=0.28.0,<0.30.0
+
+# Form data & file upload support for FastAPI (UploadFile)
+python-multipart>=0.0.9,<0.1.0
+
+# PyMuPDF library for fast PDF inspection, page counting, and text extraction
+pymupdf>=1.23.0,<1.25.0
+
+# Local vector embedding generation library
+sentence-transformers>=3.0.0
+
+# Deep learning framework backend required by sentence-transformers
+torch>=2.3.0
+
+# Scientific computing library for array serialization and operations
+numpy>=2.0.0
+
+# Local Vector Indexing Engine library for fast similarity search
+faiss-cpu>=1.8.0
+
+# Groq API Python SDK client for local AI chat RAG engine completions
+groq>=0.11.0
+
+# Loads environment variables from .env files into process environment
+python-dotenv>=1.0.1,<1.1.0
+
+# Settings management using Pydantic for clean environment handling
+pydantic-settings>=2.2.1,<2.3.0
