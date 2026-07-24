@@ -1,0 +1,26 @@
+# ==============================================================================
+# DocMind AI Backend Git Ignore Configuration
+# ==============================================================================
+# Ignores runtime artifacts, uploaded PDFs, local vector stores, and local environment files.
+# ==============================================================================
+
+# Python Bytecode & Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual Environment
+.venv/
+venv/
+
+# Environment Configuration Files (secrets)
+.env
+
+# Uploaded Files & Generated Vector Storage Data
+uploads/*
+!uploads/.gitkeep
+
+vector_store/*
+!vector_store/.gitkeep

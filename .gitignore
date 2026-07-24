@@ -1,26 +1,50 @@
 # ==============================================================================
-# DocMind AI Backend Git Ignore Configuration
+# DocMind AI Root Git Ignore Configuration
 # ==============================================================================
-# Ignores runtime artifacts, uploaded PDFs, local vector stores, and local environment files.
+# This file specifies intentionally untracked files that Git should ignore across
+# the entire repository workspace.
 # ==============================================================================
 
-# Python Bytecode & Cache
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
-
-# Virtual Environment
+# Virtual Environment & Python Execution Caches
 .venv/
 venv/
+ENV/
+env/
+__pycache__/
+*.pyc
+*.py[cod]
 
-# Environment Configuration Files (secrets)
+# Environment variables & secrets
 .env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env.local
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE & Editor Directories
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Artifacts & Log files
+*.log
+logs/
+.antigravity/
+scratch/
 
 # Uploaded Files & Generated Vector Storage Data
-uploads/*
-!uploads/.gitkeep
+uploads/
+backend/uploads/
+backend/vector_store/
 
-vector_store/*
-!vector_store/.gitkeep
+# Node modules & Frontend build outputs
+node_modules/
+frontend/node_modules/
+.next/
+frontend/.next/
