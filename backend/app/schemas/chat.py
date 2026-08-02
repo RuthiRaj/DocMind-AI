@@ -59,6 +59,11 @@ class SourceChunk(BaseModel):
         description="Page number where the chunk ends (1-based)",
         examples=[3]
     )
+    text: str = Field(
+        ...,
+        description="The raw text of the chunk",
+        examples=["Grounded chunk text content here..."]
+    )
 
 
 class ChatResponse(BaseModel):

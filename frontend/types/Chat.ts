@@ -4,6 +4,7 @@ export interface ChatCitation {
   page_number: number;
   text: string;
   similarity_score: number;
+  chunk_index: number;
 }
 
 export interface ChatResponse {

@@ -58,7 +58,8 @@ class Settings(BaseSettings):
 
     # Semantic Retrieval Engine Configuration Settings
     MAX_TOP_K: int = 20  # Maximum allowed chunks to retrieve in a single query
-    MIN_SIMILARITY_SCORE: float = 0.20  # Minimum vector similarity threshold score
+    MIN_SIMILARITY_SCORE: float = 0.65  # Minimum vector similarity threshold score
+    ADAPTIVE_SCORE_DROP_LIMIT: float = 0.15  # Limit cutoff difference for adaptive top-k pruning
     MAX_QUERY_LENGTH: int = 2000  # Maximum length of user query query string to prevent resource exhaustion
     RETRIEVAL_VERSION: str = "1.0"  # Version of the retrieval engine schema
 
@@ -68,6 +69,7 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int = 1024  # Maximum completion token length
     MAX_CONTEXT_CHUNKS: int = 5  # Maximum number of document chunks allowed in prompt context
     MAX_CONTEXT_CHARACTERS: int = 12000  # Upper context size characters limit
+    MAX_CONTEXT_LENGTH: int = 12000  # Configurable upper context character limit
     LLM_TIMEOUT: int = 30  # Timeout threshold in seconds for API completions call
     CHAT_VERSION: str = "1.0"  # Chat engine version identifier
     SYSTEM_PROMPT_VERSION: str = "1.0"  # Core system prompt version
@@ -114,6 +116,9 @@ class Settings(BaseSettings):
         if "TOP_K" in data:
             data["DEFAULT_TOP_K"] = int(data["TOP_K"])
             data["MAX_CONTEXT_CHUNKS"] = int(data["TOP_K"])
+        if "MAX_CONTEXT_LENGTH" in data:
+            data["MAX_CONTEXT_CHARACTERS"] = int(data["MAX_CONTEXT_LENGTH"])
+            data["MAX_CONTEXT_LENGTH"] = int(data["MAX_CONTEXT_LENGTH"])
         if "BACKEND_VERSION" in data:
             data["VERSION"] = data["BACKEND_VERSION"]
         return data

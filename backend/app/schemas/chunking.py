@@ -48,6 +48,16 @@ class ChunkItem(BaseModel):
         description="Ending PDF page number (1-based)",
         examples=[2]
     )
+    page_start: int = Field(
+        ...,
+        description="Starting PDF page number (1-based) (Alias of start_page)",
+        examples=[1]
+    )
+    page_end: int = Field(
+        ...,
+        description="Ending PDF page number (1-based) (Alias of end_page)",
+        examples=[2]
+    )
     character_count: int = Field(
         ...,
         description="Character length of the chunk text",

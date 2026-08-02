@@ -5,12 +5,19 @@ Configures the FastAPI application instance, CORS middleware, API routes,
 and foundational system endpoints (Root and Health check).
 """
 
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict
 
 from app.core.config import settings
 from app.api.router import api_router
+
+# Configure basic logging level on startup
+logging.basicConfig(
+    level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 
 # Initialize FastAPI Application with metadata
 app = FastAPI(

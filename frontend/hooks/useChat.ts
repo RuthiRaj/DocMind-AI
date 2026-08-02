@@ -26,7 +26,7 @@ export function useChat(documentId: string) {
     setIsSending(true);
 
     try {
-      const response = await sendChatMessage(documentId, { query: text });
+      const response = await sendChatMessage(documentId, { question: text });
       
       const assistantMessage: Message = {
         id: Math.random().toString(36).substring(2, 9),

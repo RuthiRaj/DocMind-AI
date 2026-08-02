@@ -53,3 +53,31 @@ async def query_document(
         RetrievalResponse: List of ranked similarity results.
     """
     return await retrieval_service.query_document(document_id, request)
+
+
+@router.get(
+    "/retrieve/{document_id}/debug",
+    status_code=status.HTTP_200_OK,
+    summary="Get RAG Retrieval Debug Logs",
+    description="Loads and returns the query session history log of RAG retrieval debugging info.",
+    responses={
+        200: {
+            "description": "Debug logs successfully loaded and returned"
+        },
+        404: {
+            "model": HTTPErrorDetail,
+            "description": "Not Found (Specified document or debug log file does not exist)"
+        },
+        500: {
+            "model": HTTPErrorDetail,
+            "description": "Internal Server Error (Unexpected file system or JSON parser errors)"
+        }
+    }
+)
+async def get_retrieval_debug(
+    document_id: str
+):
+    """
+    HTTP GET endpoint handler for retrieval debug logs.
+    """
+    return retrieval_service.get_debug_info(document_id)

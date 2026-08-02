@@ -4,7 +4,7 @@ Semantic Retrieval Pydantic Schemas.
 Defines Pydantic request, result item, and response models.
 """
 
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
@@ -98,6 +98,16 @@ class RetrievalResult(BaseModel):
         ...,
         description="Text content of the retrieved chunk",
         examples=["Supervised learning is..."]
+    )
+    document_id: str = Field(
+        ...,
+        description="Unique UUID document identifier",
+        examples=["550e8400-e29b-41d4-a716-446655440000"]
+    )
+    last_chunk_index: Optional[int] = Field(
+        default=None,
+        description="Sequential 1-based index of the last chunk if merged",
+        examples=[13]
     )
 
 

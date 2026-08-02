@@ -320,7 +320,8 @@ class ChatService:
                     chunk_index=chunk.chunk_index,
                     score=round(chunk.score, 4),
                     start_page=chunk.start_page,
-                    end_page=chunk.end_page
+                    end_page=chunk.end_page,
+                    text=chunk.text
                 )
             )
 

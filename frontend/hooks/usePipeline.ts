@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { processPdf } from '@/services/processing';
 import { chunkDocument } from '@/services/chunking';
@@ -17,6 +17,8 @@ export function usePipeline(documentId: string) {
   const [activeStage, setActiveStage] = useState<string | null>(null);
   const [loadingStage, setLoadingStage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isPipelineRunning, setIsPipelineRunning] = useState(false);
+  const isRunningRef = useRef(false);
 
   const refreshQueries = () => {
     queryClient.invalidateQueries({ queryKey: ['document-status', documentId] });
@@ -80,6 +82,9 @@ export function usePipeline(documentId: string) {
 
   // Run all remaining pipeline stages sequentially
   const runFullPipeline = async () => {
+    if (isRunningRef.current) return;
+    isRunningRef.current = true;
+    setIsPipelineRunning(true);
     try {
       // 1. Get current status to see where to resume
       const statusData = await getDocumentStatus(documentId);
@@ -116,6 +121,9 @@ export function usePipeline(documentId: string) {
       const parsed = handleApiError(err);
       setError(parsed.message);
       toastError('Pipeline Execution Error', parsed.message);
+    } finally {
+      isRunningRef.current = false;
+      setIsPipelineRunning(false);
     }
   };
 
@@ -128,6 +136,6 @@ export function usePipeline(documentId: string) {
     loadingStage,
     activeStage,
     error,
-    isExecuting: loadingStage !== null,
+    isExecuting: isPipelineRunning || loadingStage !== null,
   };
 }
