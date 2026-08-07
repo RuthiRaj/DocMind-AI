@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useRetrieval } from '@/hooks/useRetrieval';
 import { useDocuments } from '@/hooks/useDocuments';
 import MainLayout from '@/components/layout/MainLayout';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/Card';
+import { Card, CardContent, CardHeader } from '@/components/ui/Card';
 import Button from '@/components/ui/Button';
 import Badge from '@/components/ui/Badge';
 import Input from '@/components/ui/Input';

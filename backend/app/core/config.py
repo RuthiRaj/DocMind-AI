@@ -76,6 +76,16 @@ class Settings(BaseSettings):
     ENABLE_TOKEN_ESTIMATION: bool = True  # Enable estimated token metrics tracking
     ENABLE_REQUEST_LOGGING: bool = True  # Observability logger flag
 
+    # API Rate Limiting Configuration Settings
+    GENERAL_REQUEST_LIMIT: int = 100  # Default general request limit per client IP
+    GENERAL_REQUEST_WINDOW_SECONDS: int = 60  # Default time window in seconds
+    EXPENSIVE_REQUEST_LIMIT: int = 10  # Stricter request limit for expensive/LLM endpoints
+    EXPENSIVE_REQUEST_WINDOW_SECONDS: int = 60  # Time window for expensive/LLM endpoints
+
+    # Debug Log Telemetry Configuration Settings
+    DEBUG_LOG_MAX_ENTRIES: int = 100  # Default maximum entries per document debug log
+    DEBUG_LOG_MAX_SIZE_MB: float = 1.0  # Default maximum size in MB per document debug log
+
     # CORS configuration - default allowed origins for local frontend development
     CORS_ORIGINS: Union[str, List[str]] = [
         "http://localhost:3000",

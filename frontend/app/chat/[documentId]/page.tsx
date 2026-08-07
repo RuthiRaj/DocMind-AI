@@ -7,10 +7,9 @@ import remarkGfm from 'remark-gfm';
 import { useChat } from '@/hooks/useChat';
 import { useDocuments } from '@/hooks/useDocuments';
 import MainLayout from '@/components/layout/MainLayout';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/Card';
+import { Card, CardContent } from '@/components/ui/Card';
 import Button from '@/components/ui/Button';
 import Input from '@/components/ui/Input';
-import Badge from '@/components/ui/Badge';
 import Dialog from '@/components/ui/Dialog';
 import Skeleton from '@/components/ui/Skeleton';
 import { copyToClipboard } from '@/lib/copy';
@@ -262,7 +261,7 @@ export default function ChatPage({ params }: ChatPageProps) {
                                   <Bookmark className="w-3 h-3 text-primary" />
                                   Sources:
                                 </span>
-                                {m.citations.map((c, idx) => (
+                                {m.citations.map((c) => (
                                   <button
                                     key={c.chunk_id}
                                     onClick={() =>

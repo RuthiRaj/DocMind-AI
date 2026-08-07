@@ -55,6 +55,12 @@ class SentenceTransformerProvider(EmbeddingProvider):
             
         return SentenceTransformerProvider._model_instance
 
+    def initialize_model(self) -> None:
+        """
+        Explicitly pre-initializes and caches the model instance during application startup.
+        """
+        self._get_model()
+
     def generate_embeddings(self, texts: list[str]) -> np.ndarray:
         """
         Generates dense vector embeddings using local inference.

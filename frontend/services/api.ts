@@ -12,7 +12,7 @@ const apiClient = axios.create({
 
 export function handleApiError(error: unknown): ApiError {
   if (axios.isAxiosError(error)) {
-    const axiosError = error as AxiosError<any>;
+    const axiosError = error as AxiosError<{ detail?: string | unknown }>;
     
     // Map offline/timeout errors to helpful instructions
     if (axiosError.code === 'ERR_NETWORK') {

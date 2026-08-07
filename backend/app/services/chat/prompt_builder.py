@@ -18,19 +18,8 @@ class PromptBuilder:
         """
         Retrieves the core grounding instructions system prompt.
         """
-        return (
-            "You are DocMind AI, a helpful, precise, and professional document analysis assistant. "
-            "Your sole objective is to answer the user's question using only the provided document text context segments. "
-            "You must follow these strict grounding rules at all times:\n"
-            "1. Answer the question using ONLY the provided document text context below.\n"
-            "2. Do NOT use outside knowledge, external facts, or pre-trained assumptions to answer the question.\n"
-            "3. If the answer cannot be found in the provided document text context, you must explicitly respond with exactly: "
-            "\"I couldn't find enough information in this document to answer your question.\"\n"
-            "4. Never invent, fabricate, or hallucinate details. Keep responses concise, factual, and professional.\n"
-            "5. Preserve original technical terminology, abbreviations, and definitions present in the document.\n"
-            "6. Do not mention vectors, embeddings, similarity scores, FAISS, chunks, prompt templates, or internal implementation details in your responses.\n"
-            f"Prompt Template Version: {settings.SYSTEM_PROMPT_VERSION}"
-        )
+        from app.core.prompts import RAG_SYSTEM_PROMPT
+        return RAG_SYSTEM_PROMPT
 
     @staticmethod
     def compile_context(chunks: list) -> str:
@@ -71,6 +60,23 @@ class PromptBuilder:
                 
             if deduped_sentences:
                 clean_chunk_text = " ".join(deduped_sentences)
-                compiled.append(f"--- Document Context Segment {i} ---\n{clean_chunk_text}")
+                
+                # Format page numbers and chunk index ranges
+                start_page = getattr(chunk, "start_page", 1) if hasattr(chunk, "start_page") else chunk.get("start_page", 1)
+                end_page = getattr(chunk, "end_page", 1) if hasattr(chunk, "end_page") else chunk.get("end_page", 1)
+                chunk_index = getattr(chunk, "chunk_index", 1) if hasattr(chunk, "chunk_index") else chunk.get("chunk_index", 1)
+                last_chunk_index = getattr(chunk, "last_chunk_index", None) if hasattr(chunk, "last_chunk_index") else chunk.get("last_chunk_index", None)
+                
+                page_str = f"{start_page} to {end_page}" if start_page != end_page else f"{start_page}"
+                chunk_str = f"{chunk_index} to {last_chunk_index}" if last_chunk_index is not None else f"{chunk_index}"
+                
+                segment_info = (
+                    f"[Document Segment {i}]\n"
+                    f"Page: {page_str}\n"
+                    f"Chunk: {chunk_str}\n"
+                    f"Content:\n"
+                    f"{clean_chunk_text}"
+                )
+                compiled.append(segment_info)
                 
         return "\n\n".join(compiled)

@@ -21,7 +21,7 @@ export function useRetrieval(documentId: string) {
     try {
       const data = await queryRetrieval(documentId, { query, top_k: topK });
       setResults(data);
-    } catch (err: any) {
+    } catch (err: unknown) {
       const parsed = handleApiError(err);
       setError(parsed.message);
       toastError('Retrieval Failed', parsed.message);

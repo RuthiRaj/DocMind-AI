@@ -52,7 +52,9 @@ async def query_document(
     Returns:
         RetrievalResponse: List of ranked similarity results.
     """
-    return await retrieval_service.query_document(document_id, request)
+    import uuid
+    request_id = str(uuid.uuid4())
+    return await retrieval_service.query_document(document_id, request, request_id=request_id)
 
 
 @router.get(

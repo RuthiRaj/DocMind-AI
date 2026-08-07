@@ -19,10 +19,13 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     // Read theme from localStorage or system settings
     const storedTheme = localStorage.getItem('theme') as Theme | null;
     const systemTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    
     const initialTheme = storedTheme || systemTheme;
-    setTheme(initialTheme);
-    setMounted(true);
+    
+    // Defer state updates to avoid synchronous setState inside useEffect body
+    requestAnimationFrame(() => {
+      setTheme(initialTheme);
+      setMounted(true);
+    });
   }, []);
 
   useEffect(() => {

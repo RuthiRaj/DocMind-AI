@@ -50,7 +50,7 @@ export function useUpload() {
       // Automatically redirect to the pipeline tracking dashboard screen
       router.push(`/documents/${result.document_id}/pipeline`);
       return result;
-    } catch (err: any) {
+    } catch (err: unknown) {
       const parsedError = handleApiError(err);
       setError(parsedError.message);
       toastError('Upload Failed', parsedError.message);

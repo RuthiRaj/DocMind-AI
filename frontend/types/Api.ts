@@ -7,7 +7,7 @@ export interface ApiResponse<T> {
 export interface ApiError {
   message: string;
   statusCode?: number;
-  details?: string | Record<string, any>;
+  details?: string | Record<string, unknown>;
 }
 
 export interface CleanupResponse {

@@ -173,7 +173,8 @@ class ChatService:
             retrieved_chunks = self.retrieval_service.retrieve(
                 document_id=safe_doc_id,
                 query=request.question,
-                top_k=request.top_k
+                top_k=request.top_k,
+                request_id=request_id
             )
         except Exception as ret_err:
             logger.exception("[Request: %s] RetrievalService query execution failed", request_id)
@@ -219,6 +220,20 @@ class ChatService:
             }
             self._write_atomic(stats_path, stats_payload)
 
+            self._enrich_debug_info(
+                doc_dir=doc_dir,
+                question=request.question,
+                cleaned_chunks=[],
+                context_char_count=0,
+                estimated_prompt_tokens=0,
+                estimated_completion_tokens=0,
+                estimated_total_tokens=0,
+                generation_time_ms=0,
+                system_prompt="",
+                fallback_used=True,
+                request_id=request_id
+            )
+
             return ChatResponse(
                 success=True,
                 document_id=safe_doc_id,
@@ -262,6 +277,21 @@ class ChatService:
         if not cleaned_chunks:
             logger.warning("[Request: %s] No valid chunks remaining after deduplication. Skipping LLM.", request_id)
             overall_time_ms = int(round((time.perf_counter() - overall_start) * 1000))
+
+            self._enrich_debug_info(
+                doc_dir=doc_dir,
+                question=request.question,
+                cleaned_chunks=[],
+                context_char_count=0,
+                estimated_prompt_tokens=0,
+                estimated_completion_tokens=0,
+                estimated_total_tokens=0,
+                generation_time_ms=0,
+                system_prompt="",
+                fallback_used=True,
+                request_id=request_id
+            )
+
             return ChatResponse(
                 success=True,
                 document_id=safe_doc_id,
@@ -318,6 +348,7 @@ class ChatService:
                 SourceChunk(
                     chunk_id=chunk.chunk_id,
                     chunk_index=chunk.chunk_index,
+                    last_chunk_index=getattr(chunk, "last_chunk_index", None) if hasattr(chunk, "last_chunk_index") else chunk.get("last_chunk_index", None),
                     score=round(chunk.score, 4),
                     start_page=chunk.start_page,
                     end_page=chunk.end_page,
@@ -364,6 +395,21 @@ class ChatService:
         except Exception as err:
             logger.warning("[Request: %s] Failed to write chat_statistics.json: %s", request_id, str(err))
 
+        # Enrich debug_info.json with complete generation info
+        self._enrich_debug_info(
+            doc_dir=doc_dir,
+            question=request.question,
+            cleaned_chunks=cleaned_chunks,
+            context_char_count=context_char_count,
+            estimated_prompt_tokens=estimated_prompt_tokens,
+            estimated_completion_tokens=estimated_completion_tokens,
+            estimated_total_tokens=estimated_total_tokens,
+            generation_time_ms=generation_time_ms,
+            system_prompt=system_prompt,
+            fallback_used=(answer == fallback_msg),
+            request_id=request_id
+        )
+
         # 14. Return Response payload
         return ChatResponse(
             success=True,
@@ -378,3 +424,78 @@ class ChatService:
             generation_time_ms=generation_time_ms,
             sources=sources
         )
+
+    def _enrich_debug_info(
+        self,
+        doc_dir: Path,
+        question: str,
+        cleaned_chunks: list,
+        context_char_count: int,
+        estimated_prompt_tokens: int,
+        estimated_completion_tokens: int,
+        estimated_total_tokens: int,
+        generation_time_ms: int,
+        system_prompt: str,
+        fallback_used: bool,
+        request_id: Optional[str] = None
+    ) -> None:
+        """
+        Enriches the debug entry in debug_info.json matching the request_id with generation and context metadata.
+        """
+        debug_path = doc_dir / "debug_info.json"
+        if debug_path.exists():
+            try:
+                with open(debug_path, "r", encoding="utf-8") as df:
+                    debug_list = json.load(df)
+                if debug_list and isinstance(debug_list, list):
+                    # Try to locate the entry matching request_id
+                    target_entry = None
+                    if request_id:
+                        for entry in reversed(debug_list):
+                            if entry.get("request_id") == request_id:
+                                target_entry = entry
+                                break
+                    
+                    # Fallback to search by question ONLY if that entry has no request_id (legacy compatibility)
+                    if not target_entry:
+                        for entry in reversed(debug_list):
+                            if entry.get("question") == question and not entry.get("request_id"):
+                                target_entry = entry
+                                break
+                                
+                    if target_entry:
+                        target_entry["model"] = self.provider.model_name()
+                        target_entry["retrieval"] = {
+                            "top_k_requested": target_entry.get("top_k_requested", settings.DEFAULT_TOP_K),
+                            "top_k_returned": target_entry.get("top_k_returned", 0),
+                            "highest_similarity": target_entry.get("highest_similarity", 0.0),
+                            "minimum_similarity": target_entry.get("minimum_similarity", 0.0)
+                        }
+                        target_entry["context"] = {
+                            "segment_count": len(cleaned_chunks),
+                            "character_count": context_char_count,
+                            "estimated_tokens": estimated_prompt_tokens
+                        }
+                        target_entry["generation"] = {
+                            "provider": self.provider.provider_name(),
+                            "model": self.provider.model_name(),
+                            "latency_ms": generation_time_ms
+                        }
+                        target_entry["final_prompt_sent_to_groq"] = system_prompt
+                        target_entry["token_estimates"] = {
+                            "input_tokens": estimated_prompt_tokens,
+                            "output_tokens": estimated_completion_tokens,
+                            "total_tokens": estimated_total_tokens
+                        }
+                        target_entry["fallback_used"] = fallback_used
+                        target_entry["response_generation_time_ms"] = generation_time_ms
+                        
+                        # Enforce log retention limits (Milestone 13 Phase 3)
+                        from app.core.telemetry import prune_debug_list
+                        debug_list = prune_debug_list(debug_list)
+                        
+                        self._write_atomic(debug_path, debug_list)
+                    else:
+                        logger.warning("[Request: %s] Debug log entry not found in debug_info.json. Skipping enrichment.", request_id)
+            except Exception as err:
+                logger.warning("Failed to enrich debug_info.json: %s", str(err))

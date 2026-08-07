@@ -37,7 +37,7 @@ export function useChat(documentId: string) {
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
-    } catch (err: any) {
+    } catch (err: unknown) {
       const parsed = handleApiError(err);
       
       const errorMessage: Message = {

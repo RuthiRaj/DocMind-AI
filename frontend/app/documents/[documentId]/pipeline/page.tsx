@@ -144,12 +144,19 @@ export default function PipelinePage({ params }: PipelinePageProps) {
 
   const isFinished = statusData?.chat_ready === true;
 
+  // Keep runFullPipeline stable to prevent unnecessary effect triggers
+  const runFullPipelineRef = React.useRef(runFullPipeline);
+  
+  useEffect(() => {
+    runFullPipelineRef.current = runFullPipeline;
+  });
+
   // Auto-run sequential pipeline if upload completes but remaining are pending
   useEffect(() => {
     if (statusData && !isExecuting && !isFailed && !isFinished) {
-      runFullPipeline();
+      runFullPipelineRef.current();
     }
-  }, [statusData]);
+  }, [statusData, isExecuting, isFailed, isFinished]);
 
   return (
     <MainLayout>
@@ -291,7 +298,7 @@ export default function PipelinePage({ params }: PipelinePageProps) {
                         </div>
                         <div className="flex items-center gap-3">
                           {renderStageActionButton(stage.key, stageStatus)}
-                          <Badge variant={styles.badge as any} className="w-fit shrink-0">
+                          <Badge variant={styles.badge} className="w-fit shrink-0">
                             {styles.label}
                           </Badge>
                         </div>

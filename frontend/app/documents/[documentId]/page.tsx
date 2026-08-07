@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import Link from 'next/link';
 import { useDocuments } from '@/hooks/useDocuments';
 import MainLayout from '@/components/layout/MainLayout';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/Card';
+import { Card, CardContent } from '@/components/ui/Card';
 import Button from '@/components/ui/Button';
 import Badge from '@/components/ui/Badge';
 import Skeleton from '@/components/ui/Skeleton';
@@ -17,7 +17,6 @@ import {
   Database,
   ArrowLeft,
   ChevronRight,
-  TrendingUp,
   Sliders,
   Sparkles,
   Info
@@ -39,7 +38,7 @@ export default function DocumentDetailsPage({ params }: DetailsPageProps) {
 
   const [activeTab, setActiveTab] = useState<TabType>('metadata');
 
-  const tabs: { key: TabType; label: string; icon: any }[] = [
+  const tabs: { key: TabType; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { key: 'metadata', label: 'File Metadata', icon: FileText },
     { key: 'status', label: 'Pipeline Stage Status', icon: Activity },
     { key: 'chunking', label: 'Smart Chunking Stats', icon: Layers },

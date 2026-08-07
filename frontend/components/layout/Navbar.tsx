@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { usePathname } from 'next/navigation';
-import { Menu, Activity, ShieldCheck } from 'lucide-react';
+import { Menu, Activity } from 'lucide-react';
 import ThemeToggle from '@/components/common/ThemeToggle';
 import { ROUTES } from '@/constants/routes';
 

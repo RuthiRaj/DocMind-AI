@@ -28,7 +28,7 @@ export function useMaintenance() {
       // Invalidate queries to refresh lists and dashboard sizes
       queryClient.invalidateQueries({ queryKey: ['documents'] });
       queryClient.invalidateQueries({ queryKey: ['storage-statistics'] });
-    } catch (err: any) {
+    } catch (err: unknown) {
       const parsed = handleApiError(err);
       setError(parsed.message);
       toastError('Cleanup Failed', parsed.message);

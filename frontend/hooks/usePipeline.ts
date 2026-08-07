@@ -28,7 +28,7 @@ export function usePipeline(documentId: string) {
 
   const runStage = async (
     stageName: string,
-    actionFn: () => Promise<any>,
+    actionFn: () => Promise<unknown>,
     successMessage: string
   ): Promise<boolean> => {
     setLoadingStage(stageName);
@@ -40,7 +40,7 @@ export function usePipeline(documentId: string) {
       toastSuccess(`Stage Complete`, successMessage);
       refreshQueries();
       return true;
-    } catch (err: any) {
+    } catch (err: unknown) {
       const parsed = handleApiError(err);
       setError(parsed.message);
       toastError(`Stage Failed: ${stageName}`, parsed.message);
@@ -117,7 +117,7 @@ export function usePipeline(documentId: string) {
         const ok = await indexDoc();
         if (!ok) return;
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       const parsed = handleApiError(err);
       setError(parsed.message);
       toastError('Pipeline Execution Error', parsed.message);

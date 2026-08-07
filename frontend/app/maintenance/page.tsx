@@ -10,14 +10,11 @@ import Dialog from '@/components/ui/Dialog';
 import Skeleton from '@/components/ui/Skeleton';
 import { formatBytes } from '@/lib/formatBytes';
 import {
-  Settings,
   HardDrive,
   Trash2,
   CheckCircle2,
   ShieldCheck,
-  AlertTriangle,
-  Info,
-  Clock
+  AlertTriangle
 } from 'lucide-react';
 
 export default function MaintenancePage() {

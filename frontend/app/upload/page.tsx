@@ -7,7 +7,6 @@ import MainLayout from '@/components/layout/MainLayout';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/Card';
 import Button from '@/components/ui/Button';
 import { UploadCloud, FileText, AlertCircle, RefreshCw } from 'lucide-react';
-import { formatBytes } from '@/lib/formatBytes';
 import { FILE_LIMITS } from '@/constants/limits';
 
 export default function UploadPage() {

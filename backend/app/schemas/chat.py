@@ -4,7 +4,7 @@ AI Chat (RAG) Engine Pydantic Schemas.
 Defines Pydantic request, source chunk item, and response models.
 """
 
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
@@ -43,6 +43,11 @@ class SourceChunk(BaseModel):
         ...,
         description="Sequential 1-based index of the chunk in the document",
         examples=[12]
+    )
+    last_chunk_index: Optional[int] = Field(
+        default=None,
+        description="Sequential 1-based index of the last chunk if merged",
+        examples=[13]
     )
     score: float = Field(
         ...,

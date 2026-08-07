@@ -35,4 +35,4 @@ export const STAGE_STYLES = {
     badge: 'destructive',
     label: 'Failed',
   },
-};
+} as const;

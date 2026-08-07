@@ -2,7 +2,7 @@
 
 import React from 'react';
 import Link from 'next/link';
-import { Database, ArrowRight, Brain, Zap, Shield, Search, MessageSquare, Terminal } from 'lucide-react';
+import { Database, ArrowRight, Brain, Zap, Search, MessageSquare, Terminal } from 'lucide-react';
 import ThemeToggle from '@/components/common/ThemeToggle';
 
 export default function Home() {

@@ -111,7 +111,7 @@ class GroqProvider(LLMProvider):
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
+            {"role": "user", "content": f"DOCUMENT CONTEXT:\n{context}\n\nUSER QUESTION: {question}"}
         ]
 
         logger.info("Submitting query request to Groq (%s) with timeout=%ds...", self._model, self._timeout)

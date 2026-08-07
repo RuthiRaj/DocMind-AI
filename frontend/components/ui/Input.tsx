@@ -1,7 +1,7 @@
 import React from 'react';
 import { cn } from '@/lib/cn';
 
-export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {}
+export type InputProps = React.InputHTMLAttributes<HTMLInputElement>;
 
 export default function Input({ className, type = 'text', ...props }: InputProps) {
   return (
@@ -16,7 +16,7 @@ export default function Input({ className, type = 'text', ...props }: InputProps
   );
 }
 
-export interface LabelProps extends React.LabelHTMLAttributes<HTMLLabelElement> {}
+export type LabelProps = React.LabelHTMLAttributes<HTMLLabelElement>;
 
 export function Label({ className, ...props }: LabelProps) {
   return (

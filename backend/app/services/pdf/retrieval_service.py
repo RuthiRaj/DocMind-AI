@@ -220,7 +220,13 @@ class RetrievalService:
                 detail=detail_msg
             )
 
-    def retrieve(self, document_id: str, query: str, top_k: int = settings.DEFAULT_TOP_K) -> List[RetrievalResult]:
+    def retrieve(
+        self,
+        document_id: str,
+        query: str,
+        top_k: int = settings.DEFAULT_TOP_K,
+        request_id: Optional[str] = None
+    ) -> List[RetrievalResult]:
         """
         Performs vector similarity search on document vectors returning enriched chunk metadata
         with raw similarity score precision. Suitable for direct integration with Chat/RAG services.
@@ -229,6 +235,7 @@ class RetrievalService:
             document_id (str): Unique UUID document identifier.
             query (str): Input user search query string.
             top_k (int): Total results to retrieve.
+            request_id (str): Optional request ID for correlation across services.
 
         Returns:
             List[RetrievalResult]: Sorted list of retrieval result objects.
@@ -365,6 +372,15 @@ class RetrievalService:
         filtered_results = []
         rank_counter = 1
         for score, chunk in filtered_candidates:
+            # Defensive check: ensure chunk actually belongs to the requested document
+            chunk_doc_id = chunk.get("document_id")
+            if chunk_doc_id and chunk_doc_id != safe_doc_id:
+                logger.error("Security boundary violation: chunk document_id '%s' does not match safe_doc_id '%s'", chunk_doc_id, safe_doc_id)
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied: Retrieval candidate belongs to a different document."
+                )
+
             filtered_results.append(
                 RetrievalResult(
                     chunk_id=chunk.get("chunk_id"),
@@ -400,7 +416,12 @@ class RetrievalService:
             else:
                 last_res = merged_results[-1]
                 # Check merge conditions: sequential indices AND same page OR adjacent page
-                index_diff = abs(res.chunk_index - last_res.chunk_index)
+                current_last_idx = (
+                    last_res.last_chunk_index
+                    if last_res.last_chunk_index is not None
+                    else last_res.chunk_index
+                )
+                index_diff = abs(res.chunk_index - current_last_idx)
                 page_overlap = (
                     abs(res.start_page - last_res.end_page) <= 1 or
                     abs(res.end_page - last_res.start_page) <= 1
@@ -452,6 +473,7 @@ class RetrievalService:
         minimum_similarity = float(min(res.score for res in merged_results)) if merged_results else 0.0
         
         debug_entry = {
+            "request_id": request_id,
             "question": query,
             "embedding_time_ms": embed_time_ms,
             "faiss_time_ms": faiss_time_ms,
@@ -477,6 +499,10 @@ class RetrievalService:
                 
         debug_list.append(debug_entry)
         
+        # Enforce log retention limits (Milestone 13 Phase 3)
+        from app.core.telemetry import prune_debug_list
+        debug_list = prune_debug_list(debug_list)
+        
         try:
             self._write_atomic(debug_path, debug_list)
         except Exception as err:
@@ -488,7 +514,12 @@ class RetrievalService:
         logger.info("Similarity search executed. Found %d matches above threshold.", len(merged_results))
         return merged_results
 
-    async def query_document(self, document_id: str, request: RetrievalRequest) -> RetrievalResponse:
+    async def query_document(
+        self,
+        document_id: str,
+        request: RetrievalRequest,
+        request_id: Optional[str] = None
+    ) -> RetrievalResponse:
         """
         Coordinates full retrieval query pipeline including stats recording, rounded score formatting,
         and returning a RetrievalResponse payload.
@@ -499,7 +530,7 @@ class RetrievalService:
         start_time = time.perf_counter()
 
         # Run core retrieve
-        raw_results = self.retrieve(document_id, request.query, request.top_k)
+        raw_results = self.retrieve(document_id, request.query, request.top_k, request_id=request_id)
 
         if not raw_results:
             detail_msg = f"No relevant chunks found matching query '{request.query}' above similarity threshold of {settings.MIN_SIMILARITY_SCORE}."

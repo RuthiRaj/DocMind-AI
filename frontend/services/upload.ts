@@ -1,3 +1,4 @@
+import { AxiosProgressEvent } from 'axios';
 import apiClient from './api';
 import { ENDPOINTS } from '@/constants/api';
 
@@ -9,7 +10,7 @@ export interface UploadSuccessResponse {
 
 export async function uploadPdf(
   file: File,
-  onUploadProgress?: (progressEvent: any) => void
+  onUploadProgress?: (progressEvent: AxiosProgressEvent) => void
 ): Promise<UploadSuccessResponse> {
   const formData = new FormData();
   formData.append('file', file);
