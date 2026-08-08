@@ -32,6 +32,10 @@ embedding_service = EmbeddingService()
             "model": HTTPErrorDetail,
             "description": "Not Found (Specified document_id does not exist)"
         },
+        409: {
+            "model": HTTPErrorDetail,
+            "description": "Conflict (Embedding generation already running for this document)"
+        },
         500: {
             "model": HTTPErrorDetail,
             "description": "Internal Server Error during vector generation"

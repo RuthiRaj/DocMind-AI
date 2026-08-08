@@ -8,6 +8,7 @@ token estimations, rigorous validation, and statistics persistence.
 
 import json
 import logging
+import os
 import math
 import re
 import time
@@ -18,6 +19,7 @@ from fastapi import HTTPException, status
 
 from app.core.config import settings
 from app.schemas.chunking import ChunkItem, ChunkingResponse
+from app.services.pdf.pipeline_validator import PipelineLockManager, validate_process_artifacts, validate_chunk_artifacts
 
 # Initialize logger for chunking operations
 logger = logging.getLogger(__name__)
@@ -335,6 +337,50 @@ class ChunkingService:
 
         logger.info("Chunk validation completed successfully: %d chunks verified", len(chunks))
 
+    def _write_atomic(self, target_path: Path, content: any) -> None:
+        """
+        Atomically writes content to a target file.
+        """
+        temp_path = target_path.with_suffix(".tmp")
+        try:
+            with open(temp_path, "w", encoding="utf-8") as tf:
+                json.dump(content, tf, indent=4)
+                tf.flush()
+                os.fsync(tf.fileno())
+
+            # Atomic swap
+            os.replace(temp_path, target_path)
+        except Exception as exc:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+            logger.exception("Atomic file write failed in chunking service: %s", str(exc))
+            raise
+
+    def _update_status(self, status_path: Path, new_status: str, extra_fields: dict | None = None) -> dict:
+        """
+        Helper method to update status.json securely and return the updated dictionary.
+        """
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            with open(status_path, "r", encoding="utf-8") as sf:
+                status_data = json.load(sf)
+        except Exception as err:
+            logger.warning("Failed to read status.json. Constructing default state tracker: %s", str(err))
+            status_data = {}
+
+        status_data["chunking_status"] = new_status
+        status_data["updated_at"] = now_str
+
+        if extra_fields:
+            status_data.update(extra_fields)
+
+        self._write_atomic(status_path, status_data)
+        logger.info("Pipeline state updated to '%s' in status.json", new_status)
+        return status_data
+
     async def chunk_document(self, document_id: str, force: bool = False) -> ChunkingResponse:
         """
         Orchestrates loading text & pages.json, executing chunking, validating chunks,
@@ -364,149 +410,183 @@ class ChunkingService:
                 detail=detail_msg
             )
 
-        # Validate extracted_text.txt existence
-        if not text_path.exists():
-            detail_msg = f"Missing extracted_text.txt for document_id: {document_id}. Run process endpoint first."
-            logger.warning("Chunking failed: %s", detail_msg)
+        # Prevent concurrent duplicate execution for the same document ID
+        if not PipelineLockManager.acquire_stage(safe_doc_id, "chunk"):
+            detail_msg = "Text chunking is currently running for this document. Duplicate execution rejected."
+            logger.warning(detail_msg)
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
+                status_code=status.HTTP_409_CONFLICT,
                 detail=detail_msg
             )
 
-        # Check idempotency / already chunked status
-        if status_path.exists() and not force:
-            try:
-                with open(status_path, "r", encoding="utf-8") as sf:
-                    status_data = json.load(sf)
-                if status_data.get("chunking_status") == "completed" and chunks_path.exists():
-                    detail_msg = "Document has already been chunked. Use force=true to re-chunk."
-                    logger.warning("Chunking rejected for document_id '%s': %s", safe_doc_id, detail_msg)
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=detail_msg
+        try:
+            import asyncio
+            await asyncio.sleep(0.05)
+
+            # 1. Dependency Validation (Verify previous stage artifacts)
+            process_valid, process_msg = validate_process_artifacts(doc_dir)
+            if not process_valid:
+                detail_msg = f"Processing stage must be completed and valid before chunking. Reason: {process_msg}"
+                logger.warning("Chunking dependency validation failed for document_id '%s': %s", safe_doc_id, detail_msg)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=detail_msg
+                )
+
+            # 2. Idempotency Check (Check if already chunked and valid)
+            is_completed = False
+            if status_path.exists():
+                try:
+                    with open(status_path, "r", encoding="utf-8") as sf:
+                        status_data = json.load(sf)
+                    if status_data.get("chunking_status") == "completed":
+                        is_completed = True
+                except Exception:
+                    pass
+
+            chunks_valid, chunk_msg = validate_chunk_artifacts(doc_dir)
+
+            if not force and is_completed and chunks_valid:
+                logger.info("Text chunking already completed for document_id '%s'. Reusing valid existing artifacts.", safe_doc_id)
+                try:
+                    with open(stats_path, "r", encoding="utf-8") as stf:
+                        stats = json.load(stf)
+                    return ChunkingResponse(
+                        success=True,
+                        document_id=safe_doc_id,
+                        total_chunks=stats.get("total_chunks", 0),
+                        average_chunk_size=stats.get("average_chunk_size", 0),
+                        average_tokens=stats.get("average_tokens", 0),
+                        processing_time_ms=stats.get("processing_time_ms", 0),
+                        chunk_version=settings.CHUNK_VERSION,
+                        message="Chunking completed successfully (cached result)."
                     )
-            except HTTPException:
+                except Exception as e:
+                    logger.warning("Failed to read chunk_statistics.json for document_id '%s': %s. Re-chunking...", safe_doc_id, str(e))
+
+            logger.info("Chunking started for document_id: '%s'", safe_doc_id)
+            self._update_status(status_path, "running")
+            start_time = time.perf_counter()
+
+            # Read extracted_text.txt
+            try:
+                with open(text_path, "r", encoding="utf-8") as tf:
+                    raw_text = tf.read()
+            except Exception as read_err:
+                logger.error("Failed to read extracted_text.txt for document_id '%s': %s", safe_doc_id, str(read_err))
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error reading extracted_text.txt: {str(read_err)}"
+                )
+
+            if not raw_text or not raw_text.strip():
+                detail_msg = "extracted_text.txt is empty. Cannot generate chunks."
+                logger.warning("Chunking failed for document_id '%s': %s", safe_doc_id, detail_msg)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=detail_msg
+                )
+
+            # Read pages.json if available
+            pages_meta = []
+            if pages_path.exists():
+                try:
+                    with open(pages_path, "r", encoding="utf-8") as pf:
+                        pages_meta = json.load(pf)
+                except Exception as pe:
+                    logger.warning("Could not read pages.json for document_id '%s': %s", safe_doc_id, str(pe))
+
+            clean_text = self.preprocess_text(raw_text)
+            logger.info("Text preprocessing completed for document_id '%s' (%d clean characters)", safe_doc_id, len(clean_text))
+
+            # Generate chunks
+            chunk_items = self.generate_chunks(
+                document_id=safe_doc_id,
+                full_text=clean_text,
+                pages_meta=pages_meta,
+                chunk_size=settings.CHUNK_SIZE,
+                chunk_overlap=settings.CHUNK_OVERLAP
+            )
+
+            # Validate generated chunks
+            self.validate_chunks(chunk_items, settings.CHUNK_SIZE)
+
+            total_chunks = len(chunk_items)
+            avg_chunk_size = int(round(sum(c.character_count for c in chunk_items) / total_chunks)) if total_chunks > 0 else 0
+            avg_words = int(round(sum(c.word_count for c in chunk_items) / total_chunks)) if total_chunks > 0 else 0
+            avg_tokens = int(round(sum(c.estimated_tokens for c in chunk_items) / total_chunks)) if total_chunks > 0 else 0
+            largest_chunk = max(c.character_count for c in chunk_items) if total_chunks > 0 else 0
+            smallest_chunk = min(c.character_count for c in chunk_items) if total_chunks > 0 else 0
+
+            # Save chunks.json atomically
+            chunks_payload = [item.model_dump() for item in chunk_items]
+            try:
+                self._write_atomic(chunks_path, chunks_payload)
+                logger.info("chunks.json written atomically to '%s'", chunks_path.name)
+            except Exception as write_err:
+                logger.error("Failed to write chunks.json atomically for document_id '%s': %s", safe_doc_id, str(write_err))
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error writing chunks.json: {str(write_err)}"
+                )
+
+            end_time = time.perf_counter()
+            chunking_time_ms = int(round((end_time - start_time) * 1000))
+            processed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            # Save chunk_statistics.json atomically
+            stats_payload = {
+                "document_id": safe_doc_id,
+                "total_chunks": total_chunks,
+                "average_chunk_size": avg_chunk_size,
+                "average_words": avg_words,
+                "average_tokens": avg_tokens,
+                "largest_chunk": largest_chunk,
+                "smallest_chunk": smallest_chunk,
+                "processing_time_ms": chunking_time_ms
+            }
+            try:
+                self._write_atomic(stats_path, stats_payload)
+                logger.info("Chunk statistics saved atomically to '%s'", stats_path.name)
+            except Exception as stats_err:
+                logger.warning("Failed to save chunk_statistics.json atomically for document_id '%s': %s", safe_doc_id, str(stats_err))
+
+            # Update status.json with chunking completed and reset downstream statuses to pending
+            self._update_status(
+                status_path=status_path,
+                new_status="completed",
+                extra_fields={
+                    "embedding_status": "pending",
+                    "indexing_status": "pending",
+                    "chunk_version": settings.CHUNK_VERSION
+                }
+            )
+
+            logger.info(
+                "Chunking completed in %d ms for document_id: '%s' (%d total chunks generated)",
+                chunking_time_ms,
+                safe_doc_id,
+                total_chunks
+            )
+
+            return ChunkingResponse(
+                success=True,
+                document_id=safe_doc_id,
+                total_chunks=total_chunks,
+                average_chunk_size=avg_chunk_size,
+                average_tokens=avg_tokens,
+                processing_time_ms=chunking_time_ms,
+                chunk_version=settings.CHUNK_VERSION,
+                message="Chunking completed successfully."
+            )
+
+        except Exception as err:
+            self._update_status(status_path, "failed")
+            if isinstance(err, HTTPException):
                 raise
-            except Exception as err:
-                logger.warning("Could not read status.json for document_id '%s': %s", safe_doc_id, str(err))
-
-        logger.info("Chunking started for document_id: '%s'", safe_doc_id)
-        start_time = time.perf_counter()
-
-        # Read extracted_text.txt
-        try:
-            with open(text_path, "r", encoding="utf-8") as tf:
-                raw_text = tf.read()
-        except Exception as read_err:
-            logger.error("Failed to read extracted_text.txt for document_id '%s': %s", safe_doc_id, str(read_err))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error reading extracted_text.txt: {str(read_err)}"
+                detail=f"Failed to complete text chunking: {str(err)}"
             )
-
-        if not raw_text or not raw_text.strip():
-            detail_msg = "extracted_text.txt is empty. Cannot generate chunks."
-            logger.warning("Chunking failed for document_id '%s': %s", safe_doc_id, detail_msg)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=detail_msg
-            )
-
-        # Read pages.json if available
-        pages_meta = []
-        if pages_path.exists():
-            try:
-                with open(pages_path, "r", encoding="utf-8") as pf:
-                    pages_meta = json.load(pf)
-            except Exception as pe:
-                logger.warning("Could not read pages.json for document_id '%s': %s", safe_doc_id, str(pe))
-
-        clean_text = self.preprocess_text(raw_text)
-        logger.info("Text preprocessing completed for document_id '%s' (%d clean characters)", safe_doc_id, len(clean_text))
-
-        # Generate chunks
-        chunk_items = self.generate_chunks(
-            document_id=safe_doc_id,
-            full_text=clean_text,
-            pages_meta=pages_meta,
-            chunk_size=settings.CHUNK_SIZE,
-            chunk_overlap=settings.CHUNK_OVERLAP
-        )
-
-        # Validate generated chunks
-        self.validate_chunks(chunk_items, settings.CHUNK_SIZE)
-
-        total_chunks = len(chunk_items)
-        avg_chunk_size = int(round(sum(c.character_count for c in chunk_items) / total_chunks)) if total_chunks > 0 else 0
-        avg_words = int(round(sum(c.word_count for c in chunk_items) / total_chunks)) if total_chunks > 0 else 0
-        avg_tokens = int(round(sum(c.estimated_tokens for c in chunk_items) / total_chunks)) if total_chunks > 0 else 0
-        largest_chunk = max(c.character_count for c in chunk_items) if total_chunks > 0 else 0
-        smallest_chunk = min(c.character_count for c in chunk_items) if total_chunks > 0 else 0
-
-        # Save chunks.json
-        chunks_payload = [item.model_dump() for item in chunk_items]
-        try:
-            with open(chunks_path, "w", encoding="utf-8") as cf:
-                json.dump(chunks_payload, cf, indent=4)
-            logger.info("chunks.json written to '%s'", chunks_path.name)
-        except Exception as write_err:
-            logger.error("Failed to write chunks.json for document_id '%s': %s", safe_doc_id, str(write_err))
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error writing chunks.json: {str(write_err)}"
-            )
-
-        end_time = time.perf_counter()
-        chunking_time_ms = int(round((end_time - start_time) * 1000))
-        processed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        # Save chunk_statistics.json
-        stats_payload = {
-            "document_id": safe_doc_id,
-            "total_chunks": total_chunks,
-            "average_chunk_size": avg_chunk_size,
-            "average_words": avg_words,
-            "average_tokens": avg_tokens,
-            "largest_chunk": largest_chunk,
-            "smallest_chunk": smallest_chunk,
-            "processing_time_ms": chunking_time_ms
-        }
-        try:
-            with open(stats_path, "w", encoding="utf-8") as stf:
-                json.dump(stats_payload, stf, indent=4)
-            logger.info("Chunk statistics saved to '%s'", stats_path.name)
-        except Exception as stats_err:
-            logger.warning("Failed to save chunk_statistics.json for document_id '%s': %s", safe_doc_id, str(stats_err))
-
-        # Update status.json (chunking_status = "completed", embedding_status = "pending", chunk_version = "1.0")
-        if status_path.exists():
-            try:
-                with open(status_path, "r", encoding="utf-8") as sf:
-                    status_data = json.load(sf)
-                status_data["chunking_status"] = "completed"
-                status_data["embedding_status"] = "pending"
-                status_data["chunk_version"] = settings.CHUNK_VERSION
-                status_data["updated_at"] = processed_at
-                with open(status_path, "w", encoding="utf-8") as sf:
-                    json.dump(status_data, sf, indent=4)
-                logger.info("status.json updated for document_id '%s'", safe_doc_id)
-            except Exception as status_err:
-                logger.warning("Failed to update status.json for document_id '%s': %s", safe_doc_id, str(status_err))
-
-        logger.info(
-            "Chunking completed in %d ms for document_id: '%s' (%d total chunks generated)",
-            chunking_time_ms,
-            safe_doc_id,
-            total_chunks
-        )
-
-        return ChunkingResponse(
-            success=True,
-            document_id=safe_doc_id,
-            total_chunks=total_chunks,
-            average_chunk_size=avg_chunk_size,
-            average_tokens=avg_tokens,
-            processing_time_ms=chunking_time_ms,
-            chunk_version=settings.CHUNK_VERSION,
-            message="Chunking completed successfully."
-        )
+        finally:
+            PipelineLockManager.release_stage(safe_doc_id, "chunk")

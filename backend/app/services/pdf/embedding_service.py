@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.schemas.embedding import EmbeddingResponse
 from app.services.embeddings.provider import EmbeddingProvider
 from app.services.embeddings.sentence_transformer_provider import SentenceTransformerProvider
+from app.services.pdf.pipeline_validator import PipelineLockManager, validate_chunk_artifacts, validate_embedding_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -129,102 +130,113 @@ class EmbeddingService:
                 detail=detail_msg
             )
 
-        # 2. Verify Required Files
-        if not chunks_path.exists() or not status_path.exists():
-            detail_msg = f"Missing chunks.json or status.json for document_id: {document_id}"
-            logger.warning("Embedding failed: %s", detail_msg)
+        # Prevent concurrent duplicate execution for the same document ID
+        if not PipelineLockManager.acquire_stage(safe_doc_id, "embed"):
+            detail_msg = "Embedding generation is currently running for this document. Duplicate execution rejected."
+            logger.warning(detail_msg)
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
+                status_code=status.HTTP_409_CONFLICT,
                 detail=detail_msg
             )
 
-        # Validate pipeline constraints
         try:
-            with open(status_path, "r", encoding="utf-8") as sf:
-                status_data = json.load(sf)
-        except Exception as err:
-            logger.exception("Failed to read status.json for document_id '%s'", safe_doc_id)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to load document pipeline status: {str(err)}"
-            )
+            import asyncio
+            await asyncio.sleep(0.05)
 
-        if (
-            status_data.get("upload_status") != "completed" or
-            status_data.get("processing_status") != "completed" or
-            status_data.get("chunking_status") != "completed"
-        ):
-            detail_msg = "Document pipeline is incomplete. Upload, processing, and chunking must be completed first."
-            logger.warning("Embedding rejected for document_id '%s': %s", safe_doc_id, detail_msg)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=detail_msg
-            )
-
-        # Idempotency Constraint
-        if status_data.get("embedding_status") == "completed" and embeddings_path.exists() and not force:
-            detail_msg = "Document already embedded. Use force=true to regenerate embeddings."
-            logger.warning("Embedding rejected for document_id '%s': %s", safe_doc_id, detail_msg)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=detail_msg
-            )
-
-        # Load chunks.json & Extract Text
-        try:
-            with open(chunks_path, "r", encoding="utf-8") as cf:
-                chunks_data = json.load(cf)
-        except Exception as err:
-            logger.exception("Failed to read chunks.json for document_id '%s'", safe_doc_id)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to load chunks: {str(err)}"
-            )
-
-        if not chunks_data:
-            detail_msg = "chunks.json is empty. Cannot generate vector embeddings."
-            logger.warning("Embedding failed for document_id '%s': %s", safe_doc_id, detail_msg)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=detail_msg
-            )
-
-        texts = []
-        chunk_ids = set()
-
-        for chunk in chunks_data:
-            c_text = chunk.get("text")
-            c_id = chunk.get("chunk_id")
-
-            if not c_text or not c_text.strip():
-                detail_msg = f"Empty text chunk encountered at chunk_id: '{c_id}'."
-                logger.warning("Embedding validation failed for document_id '%s': %s", safe_doc_id, detail_msg)
+            # 2. Dependency Validation (Verify previous stage artifacts)
+            chunks_valid, chunks_msg = validate_chunk_artifacts(doc_dir)
+            if not chunks_valid:
+                detail_msg = f"Chunking stage must be completed and valid before embedding. Reason: {chunks_msg}"
+                logger.warning("Embedding dependency validation failed for document_id '%s': %s", safe_doc_id, detail_msg)
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=detail_msg
                 )
 
-            if c_id in chunk_ids:
-                detail_msg = f"Duplicate chunk_id '{c_id}' detected."
-                logger.warning("Embedding validation failed for document_id '%s': %s", safe_doc_id, detail_msg)
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=detail_msg
-                )
+            # 3. Idempotency Check (Check if already embedded and valid)
+            is_completed = False
+            if status_path.exists():
+                try:
+                    with open(status_path, "r", encoding="utf-8") as sf:
+                        status_data = json.load(sf)
+                    if status_data.get("embedding_status") == "completed":
+                        is_completed = True
+                except Exception:
+                    pass
 
-            chunk_ids.add(c_id)
-            texts.append(c_text)
+            emb_valid, emb_msg = validate_embedding_artifacts(doc_dir)
 
-        logger.info("Chunks loaded successfully for document_id '%s' (%d chunks ready)", safe_doc_id, len(texts))
+            if not force and is_completed and emb_valid:
+                logger.info("Embeddings already generated for document_id '%s'. Reusing valid existing artifacts.", safe_doc_id)
+                try:
+                    with open(metadata_path, "r", encoding="utf-8") as mf:
+                        meta = json.load(mf)
+                    return EmbeddingResponse(
+                        success=True,
+                        document_id=safe_doc_id,
+                        embedding_model=meta.get("embedding_model", self.provider.model_name()),
+                        embedding_dimension=meta.get("embedding_dimension", self.provider.dimension()),
+                        total_embeddings=meta.get("embedding_count", 0),
+                        processing_time_ms=meta.get("processing_time_ms", 0),
+                        message="Embeddings generated successfully (cached result)."
+                    )
+                except Exception as e:
+                    logger.warning("Failed to read embedding_metadata.json for document_id '%s': %s. Re-embedding...", safe_doc_id, str(e))
 
-        # Transition state to "processing"
-        self._update_status(status_path, "processing")
-        start_time = time.perf_counter()
-
-        try:
-            # 3. Separate: Model loading & inference
             logger.info("Embedding started for document_id: '%s'", safe_doc_id)
-            
+            self._update_status(status_path, "running")
+            start_time = time.perf_counter()
+
+            # Load chunks.json & Extract Text
+            try:
+                with open(chunks_path, "r", encoding="utf-8") as cf:
+                    chunks_data = json.load(cf)
+            except Exception as err:
+                logger.exception("Failed to read chunks.json for document_id '%s'", safe_doc_id)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to load chunks: {str(err)}"
+                )
+
+            if not chunks_data:
+                detail_msg = "chunks.json is empty. Cannot generate vector embeddings."
+                logger.warning("Embedding failed for document_id '%s': %s", safe_doc_id, detail_msg)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=detail_msg
+                )
+
+            texts = []
+            chunk_ids = set()
+
+            for chunk in chunks_data:
+                c_text = chunk.get("text")
+                c_id = chunk.get("chunk_id")
+
+                if not c_text or not c_text.strip():
+                    detail_msg = f"Empty text chunk encountered at chunk_id: '{c_id}'."
+                    logger.warning("Embedding validation failed for document_id '%s': %s", safe_doc_id, detail_msg)
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=detail_msg
+                    )
+
+                if c_id in chunk_ids:
+                    detail_msg = f"Duplicate chunk_id '{c_id}' detected."
+                    logger.warning("Embedding validation failed for document_id '%s': %s", safe_doc_id, detail_msg)
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=detail_msg
+                    )
+
+                chunk_ids.add(c_id)
+                texts.append(c_text)
+
+            logger.info("Chunks loaded successfully for document_id '%s' (%d chunks ready)", safe_doc_id, len(texts))
+
+            # Transition state to "processing"
+            self._update_status(status_path, "processing")
+
             try:
                 # Triggers lazy loading singleton
                 self.provider.model_name()
@@ -321,7 +333,8 @@ class EmbeddingService:
                 extra_fields={
                     "embedding_model": self.provider.model_name(),
                     "embedding_dimension": self.provider.dimension(),
-                    "embedding_version": settings.EMBEDDING_VERSION
+                    "embedding_version": settings.EMBEDDING_VERSION,
+                    "indexing_status": "pending" # Reset downstream stage
                 }
             )
             logger.info("Embedding completed for document_id '%s' in %d ms.", safe_doc_id, processing_time_ms)
@@ -346,3 +359,5 @@ class EmbeddingService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"An unexpected error occurred while generating embeddings: {str(exc)}"
             )
+        finally:
+            PipelineLockManager.release_stage(safe_doc_id, "embed")

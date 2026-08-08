@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.schemas.indexing import IndexingResponse
 from app.services.indexing.provider import IndexProvider
 from app.services.indexing.faiss_provider import FaissIndexProvider
+from app.services.pdf.pipeline_validator import PipelineLockManager, validate_embedding_artifacts, validate_indexing_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -119,59 +120,64 @@ class IndexingService:
                 detail=detail_msg
             )
 
-        # 2. Verify Required Files
-        required_files = [embeddings_path, chunks_path, status_path, embedding_metadata_path]
-        for path in required_files:
-            if not path.exists():
-                detail_msg = f"Missing required file '{path.name}' for document_id: {document_id}"
-                logger.warning("Indexing failed: %s", detail_msg)
+        # Prevent concurrent duplicate execution for the same document ID
+        if not PipelineLockManager.acquire_stage(safe_doc_id, "index"):
+            detail_msg = "Vector indexing is currently running for this document. Duplicate execution rejected."
+            logger.warning(detail_msg)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=detail_msg
+            )
+
+        try:
+            import asyncio
+            await asyncio.sleep(0.05)
+
+            # 2. Dependency Validation (Verify previous stage artifacts)
+            embeds_valid, embeds_msg = validate_embedding_artifacts(doc_dir)
+            if not embeds_valid:
+                detail_msg = f"Embedding stage must be completed and valid before indexing. Reason: {embeds_msg}"
+                logger.warning("Indexing dependency validation failed for document_id '%s': %s", safe_doc_id, detail_msg)
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=detail_msg
                 )
 
-        # Load Pipeline Status
-        try:
-            with open(status_path, "r", encoding="utf-8") as sf:
-                status_data = json.load(sf)
-        except Exception as err:
-            logger.exception("Failed to read status.json for document_id '%s'", safe_doc_id)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to load document pipeline status: {str(err)}"
-            )
+            # 3. Idempotency Check (Check if already indexed and valid)
+            is_completed = False
+            if status_path.exists():
+                try:
+                    with open(status_path, "r", encoding="utf-8") as sf:
+                        status_data = json.load(sf)
+                    if status_data.get("indexing_status") == "completed":
+                        is_completed = True
+                except Exception:
+                    pass
 
-        # Validate pipeline constraints
-        if (
-            status_data.get("upload_status") != "completed" or
-            status_data.get("processing_status") != "completed" or
-            status_data.get("chunking_status") != "completed" or
-            status_data.get("embedding_status") != "completed"
-        ):
-            detail_msg = "Document pipeline is incomplete. Upload, processing, chunking, and embedding must be completed first."
-            logger.warning("Indexing rejected for document_id '%s': %s", safe_doc_id, detail_msg)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=detail_msg
-            )
+            index_valid, index_msg = validate_indexing_artifacts(doc_dir)
 
-        # Idempotency Constraint
-        if status_data.get("indexing_status") == "completed" and index_faiss_path.exists() and not force:
-            detail_msg = "Document already indexed. Use force=true to rebuild the index."
-            logger.warning("Indexing rejected for document_id '%s': %s", safe_doc_id, detail_msg)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=detail_msg
-            )
+            if not force and is_completed and index_valid:
+                logger.info("Vector index already created for document_id '%s'. Reusing valid existing artifacts.", safe_doc_id)
+                try:
+                    with open(metadata_path, "r", encoding="utf-8") as mf:
+                        meta = json.load(mf)
+                    return IndexingResponse(
+                        success=True,
+                        document_id=safe_doc_id,
+                        index_type=meta.get("index_type", self.provider.index_type()),
+                        vector_dimension=meta.get("vector_dimension", settings.EMBEDDING_DIMENSION),
+                        indexed_vectors=meta.get("indexed_vectors", 0),
+                        processing_time_ms=meta.get("processing_time_ms", 0),
+                        message="Vector index created successfully (cached result)."
+                    )
+                except Exception as e:
+                    logger.warning("Failed to read index_metadata.json for document_id '%s': %s. Re-indexing...", safe_doc_id, str(e))
 
-        logger.info("Indexing generation pipeline started for document_id: '%s'", safe_doc_id)
-        start_time = time.perf_counter()
+            logger.info("Indexing generation pipeline started for document_id: '%s'", safe_doc_id)
+            self._update_status(status_path, "running")
+            start_time = time.perf_counter()
 
-        # Transition state to "processing"
-        self._update_status(status_path, "processing")
-
-        try:
-            # 3. Load input files
+            # 4. Load input files
             try:
                 embeddings = np.load(embeddings_path)
             except Exception as load_err:
@@ -191,7 +197,7 @@ class IndexingService:
                     detail=f"Corrupted chunks file: {str(load_err)}"
                 )
 
-            # 4. Validate Inputs
+            # 5. Validate Inputs
             logger.info("Validating input embedding matrix and text chunk counts...")
             if embeddings.size == 0 or embeddings.ndim != 2:
                 raise ValueError("Embedding matrix is empty or invalid shape.")
@@ -210,7 +216,7 @@ class IndexingService:
 
             logger.info("Input validation completed successfully: %d vectors validated.", len(embeddings))
 
-            # 5. Build FAISS Index
+            # 6. Build FAISS Index
             logger.info("Building vector index...")
             try:
                 index = self.provider.create_index(embeddings)
@@ -221,7 +227,7 @@ class IndexingService:
                     detail=f"Failed to build vector index: {str(index_err)}"
                 )
 
-            # 6. Save Index Atomically
+            # 7. Save Index Atomically
             logger.info("Persisting FAISS index file atomically...")
             try:
                 self._write_atomic(index_faiss_path, index, is_faiss=True)
@@ -232,7 +238,7 @@ class IndexingService:
                     detail=f"Index persistence failure: {str(write_err)}"
                 )
 
-            # 7. Integrity Validation: Reload and run search query
+            # 8. Integrity Validation: Reload and run search query
             logger.info("Performing index integrity validation reload check...")
             try:
                 reloaded_index = self.provider.load(index_faiss_path)
@@ -256,7 +262,7 @@ class IndexingService:
             # Get file size of index.faiss
             index_size_bytes = index_faiss_path.stat().st_size if index_faiss_path.exists() else 0
 
-            # 8. Save index_metadata.json
+            # 9. Save index_metadata.json
             meta_payload = {
                 "document_id": safe_doc_id,
                 "index_type": self.provider.index_type(),
@@ -270,7 +276,7 @@ class IndexingService:
             self._write_atomic(metadata_path, meta_payload)
             logger.info("index_metadata.json saved atomically.")
 
-            # 9. Save index_statistics.json
+            # 10. Save index_statistics.json
             stats_payload = {
                 "document_id": safe_doc_id,
                 "indexed_vectors": self.provider.vector_count(index),
@@ -281,13 +287,14 @@ class IndexingService:
             self._write_atomic(statistics_path, stats_payload)
             logger.info("index_statistics.json saved atomically.")
 
-            # 10. Update status.json with indexing completed
+            # 11. Update status.json with indexing completed
             self._update_status(
                 status_path=status_path,
                 new_status="completed",
                 extra_fields={
                     "index_type": self.provider.index_type(),
-                    "index_version": settings.INDEX_VERSION
+                    "index_version": settings.INDEX_VERSION,
+                    "chat_ready": True
                 }
             )
 
@@ -317,3 +324,5 @@ class IndexingService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"An unexpected error occurred while generating the vector index: {str(exc)}"
             )
+        finally:
+            PipelineLockManager.release_stage(safe_doc_id, "index")
