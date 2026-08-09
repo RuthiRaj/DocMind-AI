@@ -2,6 +2,7 @@ import time
 import logging
 import threading
 from typing import Dict, List, Tuple
+from collections import deque
 from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -66,6 +67,33 @@ class RateLimiter:
 
 # Global RateLimiter singleton instance
 rate_limiter = RateLimiter()
+
+
+class GroqTokenWindow:
+    """Thread-safe in-process rolling token reservation window for Groq calls."""
+
+    def __init__(self):
+        self.reservations = deque()
+        self.lock = threading.Lock()
+
+    def reserve(self, tokens: int, limit: int, window: int) -> Tuple[bool, int]:
+        now = time.time()
+        cutoff = now - window
+
+        with self.lock:
+            while self.reservations and self.reservations[0][0] <= cutoff:
+                self.reservations.popleft()
+
+            used_tokens = sum(item[1] for item in self.reservations)
+            if used_tokens + tokens > limit:
+                retry_after = max(1, int(self.reservations[0][0] + window - now)) if self.reservations else window
+                return False, retry_after
+
+            self.reservations.append((now, tokens))
+            return True, 0
+
+
+groq_token_window = GroqTokenWindow()
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):

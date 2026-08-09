@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     # Environment variable configurations
     GROQ_API_KEY: str
     GROQ_MODEL: str = "llama-3.1-8b-instant"
+    GROQ_TPM_LIMIT: int = 6000  # Shared organization-level tokens-per-minute limit
+    GROQ_QUERY_REWRITE_RESERVE_TOKENS: int = 300  # Input/output allowance for query rewriting
     EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
     UPLOAD_DIRECTORY: str = "uploads"
     MAX_UPLOAD_SIZE: int = 20971520
@@ -67,9 +69,9 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "groq"  # Default large language model API provider
     LLM_TEMPERATURE: float = 0.2  # Control generation determinism
     LLM_MAX_TOKENS: int = 1024  # Maximum completion token length
-    MAX_CONTEXT_CHUNKS: int = 20  # Maximum number of document chunks allowed in prompt context
-    MAX_CONTEXT_CHARACTERS: int = 20000  # Upper context size characters limit
-    MAX_CONTEXT_LENGTH: int = 20000  # Configurable upper context character limit
+    MAX_CONTEXT_CHUNKS: int = 10  # Maximum number of document chunks allowed in prompt context
+    MAX_CONTEXT_CHARACTERS: int = 10000  # Upper context size characters limit
+    MAX_CONTEXT_LENGTH: int = 10000  # Configurable upper context character limit
     LLM_TIMEOUT: int = 30  # Timeout threshold in seconds for API completions call
     CHAT_VERSION: str = "1.0"  # Chat engine version identifier
     SYSTEM_PROMPT_VERSION: str = "1.0"  # Core system prompt version
@@ -78,7 +80,7 @@ class Settings(BaseSettings):
 
     # Hybrid Context Strategy Settings
     MODEL_CONTEXT_WINDOW: int = 131072  # llama-3.1-8b-instant context window in tokens
-    FULL_CONTEXT_MAX_CHARS: int = 40000  # Max document chars for full-context mode (~10K tokens)
+    FULL_CONTEXT_MAX_CHARS: int = 10000  # Max document chars for full-context mode under Groq TPM limits
     CONVERSATION_MAX_TURNS: int = 10  # Max conversation turns to keep in memory per session
     CONVERSATION_MAX_TOKENS: int = 4000  # Token budget reserved for conversation history
 

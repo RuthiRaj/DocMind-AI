@@ -9,6 +9,7 @@ import logging
 from typing import List
 
 from app.core.config import settings
+from app.core.rate_limit import groq_token_window
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,23 @@ def rewrite_query(original_query: str) -> List[str]:
 
         provider = GroqProvider()
         client = provider._get_client()
+
+        rewrite_tokens = (
+            (len(_REWRITE_SYSTEM_PROMPT) + len(original_query) + settings.TOKEN_ESTIMATION_RATIO - 1)
+            // settings.TOKEN_ESTIMATION_RATIO
+            + 150
+        )
+        allowed, retry_after = groq_token_window.reserve(
+            tokens=rewrite_tokens,
+            limit=settings.GROQ_TPM_LIMIT,
+            window=60
+        )
+        if not allowed:
+            logger.warning(
+                "Query rewriter skipped because Groq token window is exhausted. Retry after %ds.",
+                retry_after,
+            )
+            return queries
 
         response = client.chat.completions.create(
             messages=[

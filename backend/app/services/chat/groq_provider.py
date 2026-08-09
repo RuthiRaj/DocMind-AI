@@ -6,6 +6,7 @@ Features lazy-loading singletons, timeout boundaries, deterministic parameters,
 and advanced error classification handling.
 """
 
+import json
 import logging
 import threading
 from fastapi import HTTPException, status
@@ -29,6 +30,7 @@ except ImportError:
     class RateLimitError(Exception): pass
 
 from app.core.config import settings
+from app.core.rate_limit import groq_token_window
 from app.services.chat.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -87,7 +89,14 @@ class GroqProvider(LLMProvider):
 
         return GroqProvider._client_instance
 
-    def generate(self, system_prompt: str, context: str, question: str, history: list | None = None) -> str:
+    def generate(
+        self,
+        system_prompt: str,
+        context: str,
+        question: str,
+        history: list | None = None,
+        context_mode: str = "RAG"
+    ) -> str:
         """
         Invokes completions endpoint.
 
@@ -118,6 +127,45 @@ class GroqProvider(LLMProvider):
         messages.append(
             {"role": "user", "content": f"DOCUMENT CONTEXT:\n{context}\n\nUSER QUESTION: {question}"}
         )
+
+        request_payload = {
+            "messages": messages,
+            "model": self._model,
+            "temperature": self._temperature,
+            "max_tokens": self._max_tokens,
+        }
+        total_prompt_chars = sum(len(message.get("content", "")) for message in messages)
+        estimated_prompt_tokens = (
+            total_prompt_chars + settings.TOKEN_ESTIMATION_RATIO - 1
+        ) // settings.TOKEN_ESTIMATION_RATIO
+        serialized_payload_bytes = len(json.dumps(request_payload, ensure_ascii=False).encode("utf-8"))
+
+        logger.info(
+            "Groq request diagnostics: context_mode=%s context_chars=%d estimated_prompt_tokens=%d "
+            "max_output_tokens=%d serialized_payload_bytes=%d",
+            context_mode,
+            len(context),
+            estimated_prompt_tokens,
+            self._max_tokens,
+            serialized_payload_bytes,
+        )
+
+        request_tokens = estimated_prompt_tokens + self._max_tokens
+        allowed, retry_after = groq_token_window.reserve(
+            tokens=request_tokens,
+            limit=settings.GROQ_TPM_LIMIT,
+            window=60
+        )
+        if not allowed:
+            logger.warning(
+                "Groq token window rejected request: requested=%d retry_after=%ds",
+                request_tokens,
+                retry_after,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"The AI service token limit is temporarily exhausted. Please try again in {retry_after} seconds."
+            )
 
         logger.info("Submitting query request to Groq (%s) with timeout=%ds...", self._model, self._timeout)
         
@@ -165,7 +213,17 @@ class GroqProvider(LLMProvider):
                 detail="Connection to the external AI provider failed."
             )
         except APIStatusError as err:
-            logger.error("Groq API returned status failure %d: %s", err.status_code, str(err))
+            response = getattr(err, "response", None)
+            response_body = getattr(err, "body", None)
+            if response_body is None and response is not None:
+                response_body = getattr(response, "text", None)
+            logger.error(
+                "Groq API returned status failure %d. message=%s response=%r body=%r",
+                err.status_code,
+                str(err),
+                response,
+                response_body,
+            )
             if err.status_code == 413:
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,

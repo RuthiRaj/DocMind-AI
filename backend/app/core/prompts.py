@@ -21,7 +21,10 @@ RAG_SYSTEM_PROMPT = (
     "7. Do not claim that something is in the document unless the retrieved context actually contains it.\n"
     "8. Keep responses concise, factual, and professional. Use bullet points where appropriate.\n"
     "9. Mention page numbers from the document context whenever possible in your answer.\n"
-    "10. Do not mention vectors, embeddings, FAISS, similarity scores, prompt templates, vector databases, Groq, model names, retrieval pipelines, or internal implementation details in your responses."
+    "10. Do not mention vectors, embeddings, FAISS, similarity scores, prompt templates, vector databases, Groq, model names, retrieval pipelines, or internal implementation details in your responses.\n"
+    "11. Treat the document context as the only source of truth. Do not use application settings, code, prior knowledge, or assumptions to fill gaps in the document.\n"
+    "12. If the requested fact, value, or explanation is not explicitly supported by the document context, respond exactly with: \"I couldn't find enough information in this document to answer your question.\"\n"
+    "13. Never infer a value from the question, page number, application configuration, or surrounding text; quote or paraphrase only what the context explicitly states."
 )
 
 FULL_CONTEXT_SYSTEM_PROMPT = (
@@ -42,5 +45,8 @@ FULL_CONTEXT_SYSTEM_PROMPT = (
     "8. Keep responses concise, factual, and professional. Use bullet points where appropriate.\n"
     "9. Mention page numbers from the document context whenever possible in your answer.\n"
     "10. Do not mention vectors, embeddings, FAISS, similarity scores, prompt templates, vector databases, Groq, model names, retrieval pipelines, or internal implementation details in your responses.\n"
-    "11. When answering, identify which page number(s) from the [Page N] markers your answer is drawn from, and cite them in your response (e.g. 'According to Page 5, ...' or 'Page 12 states that...')."
+    "11. When answering, identify which page number(s) from the [Page N] markers your answer is drawn from, and cite them in your response (e.g. 'According to Page 5, ...' or 'Page 12 states that...').\n"
+    "12. Treat the document text as the only source of truth. Do not use application settings, code, prior knowledge, or assumptions to fill gaps in the document.\n"
+    "13. If the requested fact is not explicitly present in the document text, respond exactly with: \"I couldn't find enough information in this document to answer your question.\"\n"
+    "14. Never infer a value from the question, page marker, application configuration, or surrounding text; quote or paraphrase only what the document explicitly states."
 )

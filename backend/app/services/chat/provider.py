@@ -14,7 +14,14 @@ class LLMProvider(ABC):
     """
 
     @abstractmethod
-    def generate(self, system_prompt: str, context: str, question: str, history: list | None = None) -> str:
+    def generate(
+        self,
+        system_prompt: str,
+        context: str,
+        question: str,
+        history: list | None = None,
+        context_mode: str = "RAG"
+    ) -> str:
         """
         Submits system context and query variables to the LLM backend for completions.
 

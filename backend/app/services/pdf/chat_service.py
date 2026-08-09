@@ -134,15 +134,23 @@ class ChatService:
                 detail=detail_msg
             )
 
-    def _full_context_token_budget(self, system_prompt: str, question: str, history: list) -> int:
-        """Calculate the document token budget after reserving prompt and output tokens."""
+    def _context_token_budget(
+        self,
+        system_prompt: str,
+        question: str,
+        history: list,
+        reserve_query_rewrite: bool = False
+    ) -> int:
+        """Calculate the context token budget under the shared Groq TPM ceiling."""
         fixed_prompt_chars = len(system_prompt) + len(question) + len("DOCUMENT CONTEXT:\n\nUSER QUESTION: ")
         history_chars = sum(len(message.get("content", "")) for message in history)
         reserved_tokens = (
             int((fixed_prompt_chars + history_chars + settings.TOKEN_ESTIMATION_RATIO - 1) / settings.TOKEN_ESTIMATION_RATIO)
             + settings.LLM_MAX_TOKENS
         )
-        available_tokens = max(0, settings.MODEL_CONTEXT_WINDOW - reserved_tokens)
+        if reserve_query_rewrite:
+            reserved_tokens += settings.GROQ_QUERY_REWRITE_RESERVE_TOKENS
+        available_tokens = max(0, settings.GROQ_TPM_LIMIT - reserved_tokens)
         return int(available_tokens * 0.7)
 
     async def answer_question(self, document_id: str, request: ChatRequest) -> ChatResponse:
@@ -224,7 +232,7 @@ class ChatService:
                         (len(full_context) + settings.TOKEN_ESTIMATION_RATIO - 1)
                         / settings.TOKEN_ESTIMATION_RATIO
                     )
-                    safe_context_token_budget = self._full_context_token_budget(
+                    safe_context_token_budget = self._context_token_budget(
                         system_prompt=full_context_system_prompt,
                         question=request.question,
                         history=history
@@ -266,7 +274,8 @@ class ChatService:
                     system_prompt=system_prompt,
                     context=compiled_context,
                     question=request.question,
-                    history=history if history else None
+                    history=history if history else None,
+                    context_mode=context_mode
                 )
             except Exception as gen_err:
                 logger.exception("[Request: %s] LLM generation failed (FULL_CONTEXT)", request_id)
@@ -530,6 +539,44 @@ class ChatService:
         # 8r & 9r. Compile Grounded Prompt Context
         system_prompt = PromptBuilder.get_system_prompt()
         compiled_context = PromptBuilder.compile_context(cleaned_chunks)
+        safe_context_token_budget = self._context_token_budget(
+            system_prompt=system_prompt,
+            question=request.question,
+            history=history,
+            reserve_query_rewrite=True
+        )
+
+        while cleaned_chunks:
+            estimated_context_tokens = int(
+                (len(compiled_context) + settings.TOKEN_ESTIMATION_RATIO - 1)
+                / settings.TOKEN_ESTIMATION_RATIO
+            )
+            if estimated_context_tokens <= safe_context_token_budget:
+                break
+            cleaned_chunks.pop()
+            context_char_count = sum(len(chunk.text) for chunk in cleaned_chunks)
+            compiled_context = PromptBuilder.compile_context(cleaned_chunks)
+
+        if not cleaned_chunks:
+            logger.warning(
+                "[Request: %s] Retrieved context exceeded the shared Groq TPM budget. Skipping LLM.",
+                request_id
+            )
+            return ChatResponse(
+                success=True,
+                document_id=safe_doc_id,
+                request_id=request_id,
+                question=request.question,
+                answer=fallback_msg,
+                provider=self.provider.provider_name(),
+                model=self.provider.model_name(),
+                processing_time_ms=int(round((time.perf_counter() - overall_start) * 1000)),
+                retrieval_time_ms=retrieval_time_ms,
+                generation_time_ms=0,
+                sources=[],
+                session_id=session_id,
+                context_mode=context_mode
+            )
         logger.info("[Request: %s] Modular prompt compiled (RAG).", request_id)
 
         # 10r. Call LLM Provider with conversation history
@@ -539,7 +586,8 @@ class ChatService:
                 system_prompt=system_prompt,
                 context=compiled_context,
                 question=request.question,
-                history=history if history else None
+                history=history if history else None,
+                context_mode=context_mode
             )
         except Exception as gen_err:
             logger.exception("[Request: %s] LLM generation failed", request_id)
