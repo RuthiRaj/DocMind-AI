@@ -196,6 +196,14 @@ class PDFProcessingService:
                         detail="Invalid or corrupted PDF file."
                     )
 
+                total_pages = len(doc)
+                if total_pages > settings.MAX_PDF_PAGES:
+                    logger.warning("PDF page count (%d) exceeds limit of %d for document_id '%s'", total_pages, settings.MAX_PDF_PAGES, safe_doc_id)
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"PDF page count ({total_pages}) exceeds the maximum limit of {settings.MAX_PDF_PAGES} pages."
+                    )
+
                 logger.info("PDF opened successfully for document_id: '%s'", safe_doc_id)
 
                 # Extract PDF Document Metadata
@@ -239,6 +247,12 @@ class PDFProcessingService:
 
                 full_text = "\n\n".join(page_texts)
                 text_length = len(full_text)
+                if text_length > settings.MAX_EXTRACTED_TEXT_SIZE:
+                    logger.warning("Extracted text size (%d) exceeds limit of %d for document_id '%s'", text_length, settings.MAX_EXTRACTED_TEXT_SIZE, safe_doc_id)
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Extracted text length ({text_length}) exceeds the maximum allowed size of {settings.MAX_EXTRACTED_TEXT_SIZE} characters."
+                    )
                 avg_chars = round(text_length / total_pages, 2) if total_pages > 0 else 0.0
 
                 logger.info("Text extraction completed for document_id '%s' (%d characters extracted)", safe_doc_id, text_length)

@@ -62,7 +62,12 @@ class PDFUploadService:
                 detail=detail_msg
             )
 
+        import os
         original_filename = file.filename.strip()
+        # Sanitize filename to prevent path traversal or special char injection in telemetry
+        original_filename = os.path.basename(original_filename)
+        original_filename = original_filename.replace("/", "").replace("\\", "")
+
         logger.info("Upload started for file: '%s'", original_filename)
 
         # Rule 2: Validate file extension (.pdf)
@@ -77,6 +82,17 @@ class PDFUploadService:
         # Rule 3: Validate MIME type (application/pdf)
         if file.content_type != ALLOWED_MIME_TYPE:
             detail_msg = "Invalid MIME type. Only application/pdf is supported."
+            logger.warning("Upload validation failed for file '%s': %s", original_filename, detail_msg)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=detail_msg
+            )
+
+        # Rule 4: Validate PDF Magic Bytes (%PDF)
+        header = await file.read(4)
+        await file.seek(0)
+        if header != b"%PDF":
+            detail_msg = "Invalid PDF file content structure (magic bytes mismatch)."
             logger.warning("Upload validation failed for file '%s': %s", original_filename, detail_msg)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

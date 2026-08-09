@@ -4,10 +4,11 @@ PDF Embedding API Route Handler.
 Provides the POST /embed/{document_id} endpoint for generating vector embeddings.
 """
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, status, HTTPException
 from app.schemas.embedding import EmbeddingResponse
 from app.schemas.upload import HTTPErrorDetail
 from app.services.pdf.embedding_service import EmbeddingService
+from app.services.pdf.pipeline_validator import is_valid_uuid
 
 router = APIRouter()
 embedding_service = EmbeddingService()
@@ -59,4 +60,9 @@ async def generate_embeddings(
     Returns:
         EmbeddingResponse: Metadata summary detailing vector generation execution.
     """
+    if not is_valid_uuid(document_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document ID format. Document ID must be a valid UUID v4."
+        )
     return await embedding_service.generate_document_embeddings(document_id, force=force)

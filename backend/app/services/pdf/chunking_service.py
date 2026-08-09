@@ -234,8 +234,39 @@ class ChunkingService:
                         overlap_text = raw_overlap.strip()
 
                 if overlap_text:
-                    current_units = [overlap_text, unit]
-                    current_char_count = len(overlap_text) + 2 + unit_len
+                    combined_len = len(overlap_text) + 2 + unit_len
+                    if unit_len >= chunk_size:
+                        # Edge case: unit alone fills/exceeds chunk_size — drop overlap entirely
+                        logger.debug(
+                            "Overlap dropped for document_id '%s': unit exceeds chunk_size independently (%d >= %d)",
+                            document_id, unit_len, chunk_size
+                        )
+                        current_units = [unit]
+                        current_char_count = unit_len
+                    elif combined_len > chunk_size:
+                        # Trim overlap at word boundary to fit within chunk_size
+                        max_overlap_len = chunk_size - 2 - unit_len
+                        if max_overlap_len <= 0:
+                            current_units = [unit]
+                            current_char_count = unit_len
+                        else:
+                            trimmed_overlap = overlap_text[:max_overlap_len]
+                            # Cut at last word boundary to avoid mid-word truncation
+                            last_space = trimmed_overlap.rfind(" ")
+                            if last_space > 0:
+                                trimmed_overlap = trimmed_overlap[:last_space].strip()
+                            else:
+                                trimmed_overlap = trimmed_overlap.strip()
+
+                            if trimmed_overlap:
+                                current_units = [trimmed_overlap, unit]
+                                current_char_count = len(trimmed_overlap) + 2 + unit_len
+                            else:
+                                current_units = [unit]
+                                current_char_count = unit_len
+                    else:
+                        current_units = [overlap_text, unit]
+                        current_char_count = len(overlap_text) + 2 + unit_len
                 else:
                     current_units = [unit]
                     current_char_count = unit_len
@@ -295,6 +326,12 @@ class ChunkingService:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Chunk validation failed: No chunks generated."
+            )
+
+        if len(chunks) > settings.MAX_CHUNKS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Generated chunks count ({len(chunks)}) exceeds the maximum allowed limit of {settings.MAX_CHUNKS}."
             )
 
         seen_ids = set()

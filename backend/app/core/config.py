@@ -58,7 +58,7 @@ class Settings(BaseSettings):
 
     # Semantic Retrieval Engine Configuration Settings
     MAX_TOP_K: int = 20  # Maximum allowed chunks to retrieve in a single query
-    MIN_SIMILARITY_SCORE: float = 0.65  # Minimum vector similarity threshold score
+    MIN_SIMILARITY_SCORE: float = 0.45  # Minimum vector similarity threshold score
     ADAPTIVE_SCORE_DROP_LIMIT: float = 0.15  # Limit cutoff difference for adaptive top-k pruning
     MAX_QUERY_LENGTH: int = 2000  # Maximum length of user query query string to prevent resource exhaustion
     RETRIEVAL_VERSION: str = "1.0"  # Version of the retrieval engine schema
@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     GENERAL_REQUEST_WINDOW_SECONDS: int = 60  # Default time window in seconds
     EXPENSIVE_REQUEST_LIMIT: int = 10  # Stricter request limit for expensive/LLM endpoints
     EXPENSIVE_REQUEST_WINDOW_SECONDS: int = 60  # Time window for expensive/LLM endpoints
+
+    # Resource Safety Limit Settings
+    MAX_PDF_PAGES: int = 100
+    MAX_EXTRACTED_TEXT_SIZE: int = 1000000
+    MAX_CHUNKS: int = 2000
 
     # Debug Log Telemetry Configuration Settings
     DEBUG_LOG_MAX_ENTRIES: int = 100  # Default maximum entries per document debug log

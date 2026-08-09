@@ -4,10 +4,11 @@ PDF Vector Indexing API Route Handler.
 Provides the POST /index/{document_id} endpoint for generating vector indices.
 """
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, status, HTTPException
 from app.schemas.indexing import IndexingResponse
 from app.schemas.upload import HTTPErrorDetail
 from app.services.pdf.indexing_service import IndexingService
+from app.services.pdf.pipeline_validator import is_valid_uuid
 
 router = APIRouter()
 indexing_service = IndexingService()
@@ -59,4 +60,9 @@ async def generate_index(
     Returns:
         IndexingResponse: Metadata summary detailing indexing execution.
     """
+    if not is_valid_uuid(document_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document ID format. Document ID must be a valid UUID v4."
+        )
     return await indexing_service.generate_document_index(document_id, force=force)

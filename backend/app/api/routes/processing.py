@@ -4,10 +4,11 @@ PDF Processing Engine API Route Handler.
 Provides the POST /process/{document_id} endpoint for processing uploaded PDF documents.
 """
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, status, HTTPException
 from app.schemas.processing import PDFProcessingResponse
 from app.schemas.upload import HTTPErrorDetail
 from app.services.pdf.processing_service import PDFProcessingService
+from app.services.pdf.pipeline_validator import is_valid_uuid
 
 router = APIRouter()
 processing_service = PDFProcessingService()
@@ -59,4 +60,9 @@ async def process_pdf(
     Returns:
         PDFProcessingResponse: Summary metadata detailing processing results.
     """
+    if not is_valid_uuid(document_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document ID format. Document ID must be a valid UUID v4."
+        )
     return await processing_service.process_pdf(document_id, force=force)

@@ -5,7 +5,8 @@ Provides document listing, detail queries, pipeline monitoring, deletion, and st
 """
 
 from typing import Optional
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, status, HTTPException
+from app.services.pdf.pipeline_validator import is_valid_uuid
 
 from app.schemas.management import (
     DocumentListResponse,
@@ -73,6 +74,11 @@ async def get_document(document_id: str) -> DocumentDetailResponse:
     """
     HTTP GET endpoint handler for specific document details.
     """
+    if not is_valid_uuid(document_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document ID format. Document ID must be a valid UUID v4."
+        )
     return management_service.get_document(document_id)
 
 
@@ -87,6 +93,11 @@ async def get_pipeline_status(document_id: str) -> PipelineStatusResponse:
     """
     HTTP GET endpoint handler for pipeline status tracking.
     """
+    if not is_valid_uuid(document_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document ID format. Document ID must be a valid UUID v4."
+        )
     return management_service.get_pipeline_status(document_id)
 
 
@@ -101,5 +112,10 @@ async def delete_document(document_id: str) -> DeleteResponse:
     """
     HTTP DELETE endpoint handler for document lifecycle removal.
     """
+    if not is_valid_uuid(document_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document ID format. Document ID must be a valid UUID v4."
+        )
     res = management_service.delete_document(document_id)
     return DeleteResponse(**res)

@@ -4,10 +4,11 @@ PDF Vector Similarity Retrieval API Route Handler.
 Provides the POST /retrieve/{document_id} endpoint for semantic chunk retrieval.
 """
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, status, HTTPException
 from app.schemas.retrieval import RetrievalRequest, RetrievalResponse
 from app.schemas.upload import HTTPErrorDetail
 from app.services.pdf.retrieval_service import RetrievalService
+from app.services.pdf.pipeline_validator import is_valid_uuid
 
 router = APIRouter()
 retrieval_service = RetrievalService()
@@ -52,6 +53,11 @@ async def query_document(
     Returns:
         RetrievalResponse: List of ranked similarity results.
     """
+    if not is_valid_uuid(document_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document ID format. Document ID must be a valid UUID v4."
+        )
     import uuid
     request_id = str(uuid.uuid4())
     return await retrieval_service.query_document(document_id, request, request_id=request_id)
@@ -82,4 +88,9 @@ async def get_retrieval_debug(
     """
     HTTP GET endpoint handler for retrieval debug logs.
     """
+    if not is_valid_uuid(document_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document ID format. Document ID must be a valid UUID v4."
+        )
     return retrieval_service.get_debug_info(document_id)

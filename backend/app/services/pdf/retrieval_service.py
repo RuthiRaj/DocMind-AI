@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
+from collections import defaultdict
 from fastapi import HTTPException, status
 
 from app.core.config import settings
@@ -291,52 +292,85 @@ class RetrievalService:
 
         logger.info("Retrieval started for document_id '%s' (Query: '%s', top_k=%d)", safe_doc_id, query, top_k)
 
-        # 6. Generate Query Embedding using existing singleton
+        # 6. Multi-Query Rewriting: generate alternate phrasings for broader retrieval
+        from app.services.retrieval.query_rewriter import rewrite_query
+
+        rewrite_start = time.perf_counter()
+        query_variants = rewrite_query(query)
+        rewrite_time_ms = int(round((time.perf_counter() - rewrite_start) * 1000))
+
+        logger.info(
+            "Multi-query expansion: %d variants generated in %d ms: %s",
+            len(query_variants), rewrite_time_ms,
+            [q[:80] for q in query_variants]
+        )
+
+        # 7. Generate Query Embeddings for all variants
         embed_start = time.perf_counter()
         try:
-            # SentenceTransformer model generates float32 array
-            query_embedding = self.embedding_provider.generate_embeddings([query])[0]
-            logger.info("Query embedding generated successfully.")
+            query_embeddings = self.embedding_provider.generate_embeddings(query_variants)
+            logger.info("Query embeddings generated successfully for %d variants.", len(query_embeddings))
         except Exception as err:
-            logger.exception("Embedding provider failed to encode query")
+            logger.exception("Embedding provider failed to encode query variants")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Query embedding generation failed: {str(err)}"
             )
         embed_time_ms = int(round((time.perf_counter() - embed_start) * 1000))
 
-        # 7. Perform Semantic Search on persisting FAISS index
+        # 8. Perform Semantic Search for each query variant and merge results
         faiss_start = time.perf_counter()
-        try:
-            # Query vector is L2 normalized within FaissRetrievalProvider search execution
-            search_matches = self.provider.search(query_embedding, top_k, index_path)
-        except Exception as err:
-            logger.exception("Similarity search execution failed")
+        # Track the best score per vector index across all query variants
+        best_score_per_idx: Dict[int, float] = defaultdict(lambda: -1.0)
+
+        for variant_idx, q_embedding in enumerate(query_embeddings):
+            try:
+                variant_matches = self.provider.search(q_embedding, top_k, index_path)
+                for score, vector_idx in variant_matches:
+                    if vector_idx >= 0 and vector_idx < total_chunks:
+                        if score > best_score_per_idx[vector_idx]:
+                            best_score_per_idx[vector_idx] = score
+            except Exception as err:
+                logger.warning(
+                    "FAISS search failed for query variant %d (graceful skip): %s",
+                    variant_idx, str(err)
+                )
+
+        if not best_score_per_idx:
+            # All FAISS searches failed — raise the error for the original query
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Index similarity search failed: {str(err)}"
+                detail="Index similarity search failed for all query variants."
             )
+
+        # Convert merged results to sorted list of (score, vector_idx)
+        search_matches = sorted(
+            [(score, idx) for idx, score in best_score_per_idx.items()],
+            key=lambda x: x[0],
+            reverse=True
+        )
         faiss_time_ms = int(round((time.perf_counter() - faiss_start) * 1000))
 
+        logger.info(
+            "Multi-query FAISS merge: %d unique chunks from %d query variants",
+            len(search_matches), len(query_variants)
+        )
+
+        # 9 & 10. Map merged matches to Chunks, filter duplicates
         filter_start = time.perf_counter()
         initial_candidates = []
         seen_chunk_ids = set()
         seen_texts = set()
 
-        # 8 & 9. Map matches to Chunks, filter duplicates
         for score, vector_idx in search_matches:
-            if vector_idx < 0 or vector_idx >= total_chunks:
-                logger.warning("Vector index match '%d' is out of bounds for chunk collection size %d", vector_idx, total_chunks)
-                continue
-
             chunk = chunks_data[vector_idx]
             chunk_id = chunk.get("chunk_id")
             text_content = chunk.get("text", "")
-            
+
             # Normalize text content for deduplication
             norm_text = " ".join(text_content.lower().split())
 
-            # Check for duplicate vector index matches
+            # Check for duplicate chunk ID
             if chunk_id in seen_chunk_ids:
                 continue
 
@@ -346,7 +380,7 @@ class RetrievalService:
 
             seen_chunk_ids.add(chunk_id)
             seen_texts.add(norm_text)
-            
+
             initial_candidates.append((score, chunk))
 
         # Filter scores below similarity threshold (absolute check)
@@ -455,11 +489,13 @@ class RetrievalService:
 
         # Performance timing logs
         logger.info(
+            "Rewrite Time  : %d ms\n"
             "Embedding Time : %d ms\n"
             "FAISS Search : %d ms\n"
             "Filtering : %d ms\n"
             "Merge : %d ms\n"
             "Total Retrieval : %d ms",
+            rewrite_time_ms,
             embed_time_ms,
             faiss_time_ms,
             filter_time_ms,
@@ -475,6 +511,8 @@ class RetrievalService:
         debug_entry = {
             "request_id": request_id,
             "question": query,
+            "query_variants": query_variants,
+            "rewrite_time_ms": rewrite_time_ms,
             "embedding_time_ms": embed_time_ms,
             "faiss_time_ms": faiss_time_ms,
             "filter_time_ms": filter_time_ms,

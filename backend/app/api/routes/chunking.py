@@ -4,10 +4,11 @@ Text Chunking Engine API Route Handler.
 Provides the POST /chunk/{document_id} endpoint for chunking extracted document text.
 """
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, status, HTTPException
 from app.schemas.chunking import ChunkingResponse
 from app.schemas.upload import HTTPErrorDetail
 from app.services.pdf.chunking_service import ChunkingService
+from app.services.pdf.pipeline_validator import is_valid_uuid
 
 router = APIRouter()
 chunking_service = ChunkingService()
@@ -59,4 +60,9 @@ async def chunk_document(
     Returns:
         ChunkingResponse: Metadata summary detailing chunking execution.
     """
+    if not is_valid_uuid(document_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document ID format. Document ID must be a valid UUID v4."
+        )
     return await chunking_service.chunk_document(document_id, force=force)

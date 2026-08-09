@@ -210,3 +210,16 @@ def validate_indexing_artifacts(doc_dir: Path) -> Tuple[bool, str]:
             pass
 
     return True, "Indexing artifacts are valid."
+
+
+def is_valid_uuid(uuid_to_test: str) -> bool:
+    """
+    Checks if a string is a valid UUID v4 (36-character hexadecimal format).
+    """
+    import uuid
+    try:
+        uuid_obj = uuid.UUID(uuid_to_test, version=4)
+        return str(uuid_obj) == uuid_to_test
+    except ValueError:
+        return False
+

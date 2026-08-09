@@ -4,10 +4,11 @@ PDF AI Chat (RAG) API Route Handler.
 Provides the POST /chat/{document_id} endpoint for grounded document question completions.
 """
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, status, HTTPException
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.schemas.upload import HTTPErrorDetail
 from app.services.pdf.chat_service import ChatService
+from app.services.pdf.pipeline_validator import is_valid_uuid
 
 router = APIRouter()
 chat_service = ChatService()
@@ -52,4 +53,9 @@ async def query_chat(
     Returns:
         ChatResponse: Structured answer summary including sources and execution times.
     """
+    if not is_valid_uuid(document_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document ID format. Document ID must be a valid UUID v4."
+        )
     return await chat_service.answer_question(document_id, request)
