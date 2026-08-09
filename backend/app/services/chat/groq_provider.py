@@ -87,7 +87,7 @@ class GroqProvider(LLMProvider):
 
         return GroqProvider._client_instance
 
-    def generate(self, system_prompt: str, context: str, question: str) -> str:
+    def generate(self, system_prompt: str, context: str, question: str, history: list | None = None) -> str:
         """
         Invokes completions endpoint.
 
@@ -111,8 +111,13 @@ class GroqProvider(LLMProvider):
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"DOCUMENT CONTEXT:\n{context}\n\nUSER QUESTION: {question}"}
         ]
+        # Insert conversation history between system prompt and current question
+        if history:
+            messages.extend(history)
+        messages.append(
+            {"role": "user", "content": f"DOCUMENT CONTEXT:\n{context}\n\nUSER QUESTION: {question}"}
+        )
 
         logger.info("Submitting query request to Groq (%s) with timeout=%ds...", self._model, self._timeout)
         

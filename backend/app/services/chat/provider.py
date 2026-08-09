@@ -14,7 +14,7 @@ class LLMProvider(ABC):
     """
 
     @abstractmethod
-    def generate(self, system_prompt: str, context: str, question: str) -> str:
+    def generate(self, system_prompt: str, context: str, question: str, history: list | None = None) -> str:
         """
         Submits system context and query variables to the LLM backend for completions.
 
@@ -22,6 +22,7 @@ class LLMProvider(ABC):
             system_prompt (str): Core instructions guiding model responses.
             context (str): Document chunk text context.
             question (str): User query question.
+            history (list | None): Optional list of prior conversation turn dicts [{role, content}].
 
         Returns:
             str: Generated completion text.

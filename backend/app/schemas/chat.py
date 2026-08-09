@@ -28,6 +28,11 @@ class ChatRequest(BaseModel):
         description="Maximum number of context chunks to retrieve",
         examples=[5]
     )
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Optional client-generated session UUID for conversation memory scoping. If omitted, a server-side UUID is generated and returned in the response.",
+        examples=["a1b2c3d4-e5f6-7890-abcd-ef1234567890"]
+    )
 
 
 class SourceChunk(BaseModel):
@@ -143,4 +148,14 @@ class ChatResponse(BaseModel):
     sources: List[SourceChunk] = Field(
         ...,
         description="Cited chunk sources referenced in context"
+    )
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Session UUID for conversation memory. Returned so the client can persist and send on subsequent requests.",
+        examples=["a1b2c3d4-e5f6-7890-abcd-ef1234567890"]
+    )
+    context_mode: Optional[str] = Field(
+        default=None,
+        description="Context routing mode used for this request: 'FULL_CONTEXT' or 'RAG'",
+        examples=["FULL_CONTEXT"]
     )

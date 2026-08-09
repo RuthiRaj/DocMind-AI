@@ -1,6 +1,7 @@
 import apiClient from './api';
 import { ENDPOINTS } from '@/constants/api';
 import { ChatResponse } from '@/types/Chat';
+import { getSessionId, setSessionId } from '@/lib/session';
 
 interface BackendSource {
   chunk_id: string;
@@ -16,14 +17,28 @@ interface BackendChatResponse {
   answer: string;
   document_id: string;
   sources?: BackendSource[];
+  session_id?: string;
 }
 
 export async function sendChatMessage(
   id: string,
   payload: { question: string }
 ): Promise<ChatResponse> {
-  const res = await apiClient.post<BackendChatResponse>(ENDPOINTS.CHAT(id), payload);
+  // Include session_id for conversation memory scoping
+  const sessionId = getSessionId(id);
+  const requestPayload = {
+    ...payload,
+    session_id: sessionId,
+  };
+
+  const res = await apiClient.post<BackendChatResponse>(ENDPOINTS.CHAT(id), requestPayload);
   const data = res.data;
+
+  // Persist the session_id returned by the server (for first-time requests)
+  if (data.session_id) {
+    setSessionId(id, data.session_id);
+  }
+
   return {
     answer: data.answer,
     citations: (data.sources || []).map((source: BackendSource) => ({

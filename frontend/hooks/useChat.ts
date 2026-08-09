@@ -5,6 +5,7 @@ import { sendChatMessage } from '@/services/chat';
 import { handleApiError } from '@/services/api';
 import { Message } from '@/types/Chat';
 import { useToast } from '@/providers/ToastProvider';
+import { clearSessionId } from '@/lib/session';
 
 export function useChat(documentId: string) {
   const { error: toastError } = useToast();
@@ -57,6 +58,7 @@ export function useChat(documentId: string) {
 
   const clearChat = () => {
     setMessages([]);
+    clearSessionId(documentId);
   };
 
   return {

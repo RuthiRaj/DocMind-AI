@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     ENABLE_TOKEN_ESTIMATION: bool = True  # Enable estimated token metrics tracking
     ENABLE_REQUEST_LOGGING: bool = True  # Observability logger flag
 
+    # Hybrid Context Strategy Settings
+    MODEL_CONTEXT_WINDOW: int = 128000  # Model's total context window in tokens
+    FULL_CONTEXT_MAX_CHARS: int = 120000  # Max document chars for full-context mode (~30K tokens)
+    CONVERSATION_MAX_TURNS: int = 10  # Max conversation turns to keep in memory per session
+    CONVERSATION_MAX_TOKENS: int = 4000  # Token budget reserved for conversation history
+
     # API Rate Limiting Configuration Settings
     GENERAL_REQUEST_LIMIT: int = 100  # Default general request limit per client IP
     GENERAL_REQUEST_WINDOW_SECONDS: int = 60  # Default time window in seconds
