@@ -59,18 +59,25 @@ class ConversationStore:
             # Collect turns from most recent backward, respecting token budget
             selected_turns = []
             token_count = 0
+            max_message_chars = max(1, (max_tokens * 4) // 2)
             
             # Iterate backward through turn pairs (user + assistant = 2 messages per turn)
             i = len(history) - 2
             while i >= 0 and len(selected_turns) // 2 < max_turns:
-                user_msg = history[i]
-                assistant_msg = history[i + 1]
+                user_msg = {
+                    "role": history[i].get("role", "user"),
+                    "content": history[i].get("content", "")[-max_message_chars:]
+                }
+                assistant_msg = {
+                    "role": history[i + 1].get("role", "assistant"),
+                    "content": history[i + 1].get("content", "")[-max_message_chars:]
+                }
                 
                 # Estimate tokens (4 chars ≈ 1 token)
                 turn_chars = len(user_msg.get("content", "")) + len(assistant_msg.get("content", ""))
-                turn_tokens = turn_chars // 4
+                turn_tokens = (turn_chars + 3) // 4
                 
-                if token_count + turn_tokens > max_tokens and selected_turns:
+                if token_count + turn_tokens > max_tokens:
                     break
                     
                 token_count += turn_tokens

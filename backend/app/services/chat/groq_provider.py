@@ -166,6 +166,11 @@ class GroqProvider(LLMProvider):
             )
         except APIStatusError as err:
             logger.error("Groq API returned status failure %d: %s", err.status_code, str(err))
+            if err.status_code == 413:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="Document context too large for the AI model — try a more specific question or a shorter document."
+                )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"External AI service returned an error status: {err.status_code}."

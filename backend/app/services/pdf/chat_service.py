@@ -134,6 +134,17 @@ class ChatService:
                 detail=detail_msg
             )
 
+    def _full_context_token_budget(self, system_prompt: str, question: str, history: list) -> int:
+        """Calculate the document token budget after reserving prompt and output tokens."""
+        fixed_prompt_chars = len(system_prompt) + len(question) + len("DOCUMENT CONTEXT:\n\nUSER QUESTION: ")
+        history_chars = sum(len(message.get("content", "")) for message in history)
+        reserved_tokens = (
+            int((fixed_prompt_chars + history_chars + settings.TOKEN_ESTIMATION_RATIO - 1) / settings.TOKEN_ESTIMATION_RATIO)
+            + settings.LLM_MAX_TOKENS
+        )
+        available_tokens = max(0, settings.MODEL_CONTEXT_WINDOW - reserved_tokens)
+        return int(available_tokens * 0.7)
+
     async def answer_question(self, document_id: str, request: ChatRequest) -> ChatResponse:
         """
         Retrieves context segments and coordinates generation from the LLM provider.
@@ -197,21 +208,39 @@ class ChatService:
         if full_text_path.exists():
             try:
                 full_text = full_text_path.read_text(encoding="utf-8")
-                if len(full_text) <= settings.FULL_CONTEXT_MAX_CHARS:
-                    context_mode = "FULL_CONTEXT"
-                    # Load page metadata for inserting [Page N] markers
-                    if pages_path.exists():
-                        with open(pages_path, "r", encoding="utf-8") as pf:
-                            pages_data = json.load(pf)
+                if pages_path.exists():
+                    with open(pages_path, "r", encoding="utf-8") as pf:
+                        pages_data = json.load(pf)
+
+                if len(full_text) > settings.FULL_CONTEXT_MAX_CHARS:
                     logger.info(
-                        "[Request: %s] FULL_CONTEXT mode selected — document is %d chars (threshold: %d)",
+                        "[Request: %s] RAG mode selected — document is %d chars, exceeds char cap %d",
                         request_id, len(full_text), settings.FULL_CONTEXT_MAX_CHARS
                     )
                 else:
-                    logger.info(
-                        "[Request: %s] RAG mode selected — document is %d chars, exceeds threshold %d",
-                        request_id, len(full_text), settings.FULL_CONTEXT_MAX_CHARS
+                    full_context_system_prompt = PromptBuilder.get_full_context_system_prompt()
+                    full_context = PromptBuilder.compile_full_context(full_text, pages_data)
+                    estimated_context_tokens = int(
+                        (len(full_context) + settings.TOKEN_ESTIMATION_RATIO - 1)
+                        / settings.TOKEN_ESTIMATION_RATIO
                     )
+                    safe_context_token_budget = self._full_context_token_budget(
+                        system_prompt=full_context_system_prompt,
+                        question=request.question,
+                        history=history
+                    )
+
+                    if estimated_context_tokens <= safe_context_token_budget:
+                        context_mode = "FULL_CONTEXT"
+                        logger.info(
+                            "[Request: %s] FULL_CONTEXT mode selected — document is %d chars (%d estimated tokens; budget: %d)",
+                            request_id, len(full_text), estimated_context_tokens, safe_context_token_budget
+                        )
+                    else:
+                        logger.info(
+                            "[Request: %s] RAG mode selected — document is %d estimated tokens, exceeds budget %d",
+                            request_id, estimated_context_tokens, safe_context_token_budget
+                        )
             except Exception as err:
                 logger.warning(
                     "[Request: %s] Failed to read extracted_text.txt, falling back to RAG mode: %s",

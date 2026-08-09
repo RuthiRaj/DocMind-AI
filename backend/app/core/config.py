@@ -29,14 +29,14 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
     UPLOAD_DIRECTORY: str = "uploads"
     MAX_UPLOAD_SIZE: int = 20971520
-    CHUNK_SIZE: int = 800
-    CHUNK_OVERLAP: int = 150
-    TOP_K: int = 5
+    CHUNK_SIZE: int = 1000
+    CHUNK_OVERLAP: int = 200
+    TOP_K: int = 25
     LOG_LEVEL: str = "INFO"
 
     # Internal mapped config settings
     LLM_MODEL: str = "llama-3.1-8b-instant"
-    DEFAULT_TOP_K: int = 5
+    DEFAULT_TOP_K: int = 25
 
     # PDF Upload Configuration Settings
     # MAX_UPLOAD_SIZE is loaded from env above
@@ -57,9 +57,9 @@ class Settings(BaseSettings):
     VECTOR_DISTANCE: str = "cosine"  # Metric distance measurement algorithm
 
     # Semantic Retrieval Engine Configuration Settings
-    MAX_TOP_K: int = 20  # Maximum allowed chunks to retrieve in a single query
-    MIN_SIMILARITY_SCORE: float = 0.45  # Minimum vector similarity threshold score
-    ADAPTIVE_SCORE_DROP_LIMIT: float = 0.15  # Limit cutoff difference for adaptive top-k pruning
+    MAX_TOP_K: int = 30  # Maximum allowed chunks to retrieve in a single query
+    MIN_SIMILARITY_SCORE: float = 0.40  # Minimum vector similarity threshold score
+    ADAPTIVE_SCORE_DROP_LIMIT: float = 0.20  # Limit cutoff difference for adaptive top-k pruning
     MAX_QUERY_LENGTH: int = 2000  # Maximum length of user query query string to prevent resource exhaustion
     RETRIEVAL_VERSION: str = "1.0"  # Version of the retrieval engine schema
 
@@ -67,9 +67,9 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "groq"  # Default large language model API provider
     LLM_TEMPERATURE: float = 0.2  # Control generation determinism
     LLM_MAX_TOKENS: int = 1024  # Maximum completion token length
-    MAX_CONTEXT_CHUNKS: int = 5  # Maximum number of document chunks allowed in prompt context
-    MAX_CONTEXT_CHARACTERS: int = 12000  # Upper context size characters limit
-    MAX_CONTEXT_LENGTH: int = 12000  # Configurable upper context character limit
+    MAX_CONTEXT_CHUNKS: int = 20  # Maximum number of document chunks allowed in prompt context
+    MAX_CONTEXT_CHARACTERS: int = 20000  # Upper context size characters limit
+    MAX_CONTEXT_LENGTH: int = 20000  # Configurable upper context character limit
     LLM_TIMEOUT: int = 30  # Timeout threshold in seconds for API completions call
     CHAT_VERSION: str = "1.0"  # Chat engine version identifier
     SYSTEM_PROMPT_VERSION: str = "1.0"  # Core system prompt version
@@ -77,8 +77,8 @@ class Settings(BaseSettings):
     ENABLE_REQUEST_LOGGING: bool = True  # Observability logger flag
 
     # Hybrid Context Strategy Settings
-    MODEL_CONTEXT_WINDOW: int = 128000  # Model's total context window in tokens
-    FULL_CONTEXT_MAX_CHARS: int = 120000  # Max document chars for full-context mode (~30K tokens)
+    MODEL_CONTEXT_WINDOW: int = 131072  # llama-3.1-8b-instant context window in tokens
+    FULL_CONTEXT_MAX_CHARS: int = 40000  # Max document chars for full-context mode (~10K tokens)
     CONVERSATION_MAX_TURNS: int = 10  # Max conversation turns to keep in memory per session
     CONVERSATION_MAX_TOKENS: int = 4000  # Token budget reserved for conversation history
 
@@ -136,7 +136,6 @@ class Settings(BaseSettings):
             data["LLM_MODEL"] = data["GROQ_MODEL"]
         if "TOP_K" in data:
             data["DEFAULT_TOP_K"] = int(data["TOP_K"])
-            data["MAX_CONTEXT_CHUNKS"] = int(data["TOP_K"])
         if "MAX_CONTEXT_LENGTH" in data:
             data["MAX_CONTEXT_CHARACTERS"] = int(data["MAX_CONTEXT_LENGTH"])
             data["MAX_CONTEXT_LENGTH"] = int(data["MAX_CONTEXT_LENGTH"])
