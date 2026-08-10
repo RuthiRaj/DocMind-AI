@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str
     GROQ_MODEL: str = "llama-3.1-8b-instant"
     GROQ_TPM_LIMIT: int = 6000  # Shared organization-level tokens-per-minute limit
+    GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET: int = 5000  # Max estimated prompt tokens before calling Groq
     GROQ_QUERY_REWRITE_RESERVE_TOKENS: int = 300  # Input/output allowance for query rewriting
     EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
     UPLOAD_DIRECTORY: str = "uploads"

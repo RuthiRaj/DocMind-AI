@@ -10,6 +10,7 @@ export interface ChatCitation {
 export interface ChatResponse {
   answer: string;
   citations: ChatCitation[];
+  contextTruncated?: boolean;
 }
 
 export interface Message {

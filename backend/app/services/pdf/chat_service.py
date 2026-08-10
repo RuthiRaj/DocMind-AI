@@ -153,6 +153,113 @@ class ChatService:
         available_tokens = max(0, settings.GROQ_TPM_LIMIT - reserved_tokens)
         return int(available_tokens * 0.7)
 
+    def _estimate_groq_prompt_tokens(
+        self,
+        system_prompt: str,
+        context: str,
+        question: str,
+        history: list | None,
+    ) -> int:
+        """Estimate prompt tokens for system prompt, history, compiled context, and question."""
+        user_content = f"DOCUMENT CONTEXT:\n{context}\n\nUSER QUESTION: {question}"
+        total_chars = len(system_prompt) + len(user_content)
+        if history:
+            total_chars += sum(len(message.get("content", "")) for message in history)
+        return (total_chars + settings.TOKEN_ESTIMATION_RATIO - 1) // settings.TOKEN_ESTIMATION_RATIO
+
+    def _preflight_trim_for_groq(
+        self,
+        system_prompt: str,
+        question: str,
+        history: list | None,
+        chunks: list | None = None,
+        compiled_context: str | None = None,
+    ) -> tuple[list | None, list | None, str, bool]:
+        """
+        Trim conversation history and context to fit GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET
+        before calling Groq. History is reduced first; RAG chunks drop lowest scores next.
+
+        Returns:
+            tuple: (trimmed_history, trimmed_chunks, context, context_truncated)
+        """
+        budget = settings.GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET
+        payload_too_large_detail = (
+            "Document context too large for the AI model — "
+            "try a more specific question or a shorter document."
+        )
+        trimmed_history = list(history) if history else []
+        original_history_len = len(trimmed_history)
+
+        if chunks is not None:
+            trimmed_chunks = sorted(chunks, key=lambda chunk: chunk.score, reverse=True)
+            context = PromptBuilder.compile_context(trimmed_chunks) if trimmed_chunks else ""
+            original_chunk_count = len(trimmed_chunks)
+        else:
+            trimmed_chunks = None
+            context = compiled_context or ""
+            original_chunk_count = None
+        original_context_len = len(context)
+
+        original_tokens = self._estimate_groq_prompt_tokens(
+            system_prompt, context, question, trimmed_history or None
+        )
+
+        while trimmed_history and self._estimate_groq_prompt_tokens(
+            system_prompt, context, question, trimmed_history
+        ) > budget:
+            if len(trimmed_history) >= 2:
+                trimmed_history = trimmed_history[2:]
+            else:
+                trimmed_history = trimmed_history[1:]
+
+        if trimmed_chunks is not None:
+            while trimmed_chunks and self._estimate_groq_prompt_tokens(
+                system_prompt, context, question, trimmed_history or None
+            ) > budget:
+                trimmed_chunks.pop()
+                context = PromptBuilder.compile_context(trimmed_chunks) if trimmed_chunks else ""
+        elif context:
+            while context and self._estimate_groq_prompt_tokens(
+                system_prompt, context, question, trimmed_history or None
+            ) > budget:
+                context = context[: max(0, int(len(context) * 0.9))]
+
+        final_tokens = self._estimate_groq_prompt_tokens(
+            system_prompt, context, question, trimmed_history or None
+        )
+        if final_tokens > budget:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=payload_too_large_detail,
+            )
+
+        context_truncated = (
+            len(trimmed_history) < original_history_len
+            or (
+                original_chunk_count is not None
+                and len(trimmed_chunks) < original_chunk_count
+            )
+            or (
+                original_chunk_count is None
+                and len(context) < original_context_len
+            )
+        )
+
+        if final_tokens < original_tokens:
+            logger.info(
+                "Preflight trimmed Groq payload from %d to %d estimated tokens (budget=%d)",
+                original_tokens,
+                final_tokens,
+                budget,
+            )
+
+        return (
+            trimmed_history if trimmed_history else None,
+            trimmed_chunks,
+            context,
+            context_truncated,
+        )
+
     async def answer_question(self, document_id: str, request: ChatRequest) -> ChatResponse:
         """
         Retrieves context segments and coordinates generation from the LLM provider.
@@ -220,7 +327,13 @@ class ChatService:
                     with open(pages_path, "r", encoding="utf-8") as pf:
                         pages_data = json.load(pf)
 
-                if len(full_text) > settings.FULL_CONTEXT_MAX_CHARS:
+                if history:
+                    logger.info(
+                        "[Request: %s] RAG mode selected — conversation history present (%d messages), FULL_CONTEXT disabled",
+                        request_id,
+                        len(history),
+                    )
+                elif len(full_text) > settings.FULL_CONTEXT_MAX_CHARS:
                     logger.info(
                         "[Request: %s] RAG mode selected — document is %d chars, exceeds char cap %d",
                         request_id, len(full_text), settings.FULL_CONTEXT_MAX_CHARS
@@ -267,16 +380,26 @@ class ChatService:
             context_char_count = len(compiled_context)
             logger.info("[Request: %s] Full-context prompt compiled (%d chars).", request_id, context_char_count)
 
+            _, _, compiled_context, context_truncated = self._preflight_trim_for_groq(
+                system_prompt=system_prompt,
+                question=request.question,
+                history=history if history else None,
+                compiled_context=compiled_context,
+            )
+            context_char_count = len(compiled_context)
+
             # Call LLM with conversation history
             generation_start = time.perf_counter()
             try:
-                raw_answer = self.provider.generate(
+                raw_answer, groq_truncated = self.provider.generate(
                     system_prompt=system_prompt,
                     context=compiled_context,
                     question=request.question,
                     history=history if history else None,
                     context_mode=context_mode
                 )
+                if groq_truncated:
+                    context_truncated = True
             except Exception as gen_err:
                 logger.exception("[Request: %s] LLM generation failed (FULL_CONTEXT)", request_id)
                 if isinstance(gen_err, HTTPException):
@@ -393,10 +516,9 @@ class ChatService:
                 generation_time_ms=generation_time_ms,
                 sources=sources,
                 session_id=session_id,
-                context_mode=context_mode
+                context_mode=context_mode,
+                context_truncated=context_truncated,
             )
-
-        # ── RAG PATH (existing flow, unchanged logic) ──
         # 5r. Context Retrieval via existing RetrievalService
         retrieval_start = time.perf_counter()
         try:
@@ -536,30 +658,24 @@ class ChatService:
                 context_mode=context_mode
             )
 
-        # 8r & 9r. Compile Grounded Prompt Context
+        # 8r & 9r. Compile grounded prompt context and preflight trim for Groq budget
         system_prompt = PromptBuilder.get_system_prompt()
-        compiled_context = PromptBuilder.compile_context(cleaned_chunks)
-        safe_context_token_budget = self._context_token_budget(
-            system_prompt=system_prompt,
-            question=request.question,
-            history=history,
-            reserve_query_rewrite=True
-        )
-
-        while cleaned_chunks:
-            estimated_context_tokens = int(
-                (len(compiled_context) + settings.TOKEN_ESTIMATION_RATIO - 1)
-                / settings.TOKEN_ESTIMATION_RATIO
+        context_truncated = False
+        try:
+            history, cleaned_chunks, compiled_context, context_truncated = self._preflight_trim_for_groq(
+                system_prompt=system_prompt,
+                question=request.question,
+                history=history if history else None,
+                chunks=cleaned_chunks,
             )
-            if estimated_context_tokens <= safe_context_token_budget:
-                break
-            cleaned_chunks.pop()
-            context_char_count = sum(len(chunk.text) for chunk in cleaned_chunks)
-            compiled_context = PromptBuilder.compile_context(cleaned_chunks)
+        except HTTPException:
+            raise
+
+        context_char_count = sum(len(chunk.text) for chunk in cleaned_chunks)
 
         if not cleaned_chunks:
             logger.warning(
-                "[Request: %s] Retrieved context exceeded the shared Groq TPM budget. Skipping LLM.",
+                "[Request: %s] No context chunks remain after preflight trimming. Skipping LLM.",
                 request_id
             )
             return ChatResponse(
@@ -575,20 +691,23 @@ class ChatService:
                 generation_time_ms=0,
                 sources=[],
                 session_id=session_id,
-                context_mode=context_mode
+                context_mode=context_mode,
+                context_truncated=context_truncated,
             )
         logger.info("[Request: %s] Modular prompt compiled (RAG).", request_id)
 
         # 10r. Call LLM Provider with conversation history
         generation_start = time.perf_counter()
         try:
-            raw_answer = self.provider.generate(
+            raw_answer, groq_truncated = self.provider.generate(
                 system_prompt=system_prompt,
                 context=compiled_context,
                 question=request.question,
                 history=history if history else None,
                 context_mode=context_mode
             )
+            if groq_truncated:
+                context_truncated = True
         except Exception as gen_err:
             logger.exception("[Request: %s] LLM generation failed", request_id)
             if isinstance(gen_err, HTTPException):
@@ -701,10 +820,9 @@ class ChatService:
             generation_time_ms=generation_time_ms,
             sources=sources,
             session_id=session_id,
-            context_mode=context_mode
+            context_mode=context_mode,
+            context_truncated=context_truncated,
         )
-
-    def _enrich_debug_info(
         self,
         doc_dir: Path,
         question: str,

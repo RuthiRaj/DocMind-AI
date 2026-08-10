@@ -81,7 +81,13 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         hint = "Wait for the active stage execution to complete."
     elif exc.status_code == 413:
         error_code = "PAYLOAD_TOO_LARGE"
-        hint = "Limit upload size to match application settings parameters."
+        path = request.url.path.rstrip("/")
+        if path.startswith("/chat") or "/chat/" in path:
+            hint = "Try a shorter question or fewer chat turns — the AI model's input limit was reached."
+        elif path.startswith("/upload") or path.endswith("/upload"):
+            hint = "Limit upload size to match application settings parameters."
+        else:
+            hint = "The request payload exceeds the allowed size limit."
     elif exc.status_code == 400:
         if "uuid" in str(message).lower() or "document id" in str(message).lower():
             error_code = "INVALID_DOCUMENT_ID"

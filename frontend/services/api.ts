@@ -29,15 +29,27 @@ export function handleApiError(error: unknown): ApiError {
     }
 
     const responseStatus = axiosError.response?.status;
-    const backendMessage = axiosError.response?.data?.detail;
+    const responseData = axiosError.response?.data as
+      | { detail?: string | unknown; message?: string | unknown }
+      | undefined;
+    const backendMessage = responseData?.detail ?? responseData?.message;
+    const requestUrl = axiosError.config?.url ?? '';
 
     let friendlyMessage = 'An unexpected server error occurred.';
-    if (backendMessage) {
+    if (responseStatus === 413) {
+      if (requestUrl.includes('/chat/')) {
+        friendlyMessage =
+          (typeof backendMessage === 'string' && backendMessage) ||
+          'Document context too large for the AI model — try a more specific question or a shorter document.';
+      } else {
+        friendlyMessage =
+          (typeof backendMessage === 'string' && backendMessage) ||
+          'The uploaded PDF file is too large (maximum allowed size is 20MB).';
+      }
+    } else if (backendMessage) {
       friendlyMessage = typeof backendMessage === 'string' ? backendMessage : JSON.stringify(backendMessage);
     } else if (responseStatus === 404) {
       friendlyMessage = 'The requested resource or document was not found.';
-    } else if (responseStatus === 413) {
-      friendlyMessage = 'The uploaded PDF file is too large (maximum allowed size is 25MB).';
     } else if (responseStatus === 500) {
       friendlyMessage = 'Internal Server Error. The backend experienced an unexpected exception during execution.';
     } else {

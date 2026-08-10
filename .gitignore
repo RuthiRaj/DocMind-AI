@@ -48,3 +48,9 @@ node_modules/
 frontend/node_modules/
 .next/
 frontend/.next/
+
+# Test artifacts
+.pytest_cache/
+backend/.pytest_cache/
+.coverage
+htmlcov/

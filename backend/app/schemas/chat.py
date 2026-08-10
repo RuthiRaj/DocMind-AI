@@ -159,3 +159,8 @@ class ChatResponse(BaseModel):
         description="Context routing mode used for this request: 'FULL_CONTEXT' or 'RAG'",
         examples=["FULL_CONTEXT"]
     )
+    context_truncated: bool = Field(
+        default=False,
+        description="True when history or document context was trimmed to fit the AI model input budget",
+        examples=[False]
+    )

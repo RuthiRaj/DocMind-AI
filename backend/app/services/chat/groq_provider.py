@@ -35,6 +35,96 @@ from app.services.chat.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
 
+PAYLOAD_TOO_LARGE_DETAIL = (
+    "Document context too large for the AI model — try a more specific question or a shorter document."
+)
+
+
+def _estimate_messages_tokens(messages: list) -> int:
+    total_chars = sum(len(message.get("content", "")) for message in messages)
+    return (total_chars + settings.TOKEN_ESTIMATION_RATIO - 1) // settings.TOKEN_ESTIMATION_RATIO
+
+
+def _trim_oldest_history_turn(messages: list) -> list:
+    """Remove the oldest user/assistant pair from messages (indices 1-2)."""
+    if len(messages) <= 2:
+        return messages
+    history = messages[1:-1]
+    if len(history) >= 2:
+        history = history[2:]
+    elif history:
+        history = history[1:]
+    return [messages[0], *history, messages[-1]]
+
+
+def _truncate_context_in_user_message(content: str, max_context_chars: int) -> str:
+    prefix = "DOCUMENT CONTEXT:\n"
+    marker = "\n\nUSER QUESTION: "
+    marker_idx = content.find(marker)
+    if marker_idx == -1:
+        return content[:max_context_chars]
+
+    context_part = content[len(prefix):marker_idx]
+    suffix = content[marker_idx:]
+    if len(context_part) <= max_context_chars:
+        return content
+
+    return prefix + context_part[:max_context_chars] + suffix
+
+
+def _preflight_trim_messages(messages: list) -> tuple[list, bool]:
+    """
+    Trim history and context until estimated prompt tokens fit the preflight budget.
+    Raises HTTP 413 if the payload cannot be reduced enough without calling Groq.
+
+    Returns:
+        tuple[list, bool]: Trimmed messages and whether any history/context was removed.
+    """
+    budget = settings.GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET
+    working = list(messages)
+    truncated = False
+    original_tokens = _estimate_messages_tokens(messages)
+
+    while _estimate_messages_tokens(working) > budget and len(working) > 2:
+        working = _trim_oldest_history_turn(working)
+        truncated = True
+
+    last_content = working[-1].get("content", "")
+    while _estimate_messages_tokens(working) > budget and len(last_content) > len("DOCUMENT CONTEXT:\n\nUSER QUESTION: "):
+        marker = "\n\nUSER QUESTION: "
+        marker_idx = last_content.find(marker)
+        if marker_idx == -1:
+            break
+        context_len = marker_idx - len("DOCUMENT CONTEXT:\n")
+        if context_len <= 0:
+            break
+        new_context_len = max(0, int(context_len * 0.9))
+        last_content = _truncate_context_in_user_message(last_content, new_context_len)
+        working[-1] = {"role": "user", "content": last_content}
+        truncated = True
+
+    if _estimate_messages_tokens(working) > budget:
+        logger.warning(
+            "Groq preflight budget exceeded after trimming: estimated=%d budget=%d",
+            _estimate_messages_tokens(working),
+            budget,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=PAYLOAD_TOO_LARGE_DETAIL,
+        )
+
+    trimmed_tokens = _estimate_messages_tokens(working)
+    if trimmed_tokens < original_tokens:
+        logger.info(
+            "Groq preflight trimmed payload from %d to %d estimated tokens (budget=%d)",
+            original_tokens,
+            trimmed_tokens,
+            budget,
+        )
+
+    return working, truncated
+
 
 class GroqProvider(LLMProvider):
     """
@@ -96,7 +186,7 @@ class GroqProvider(LLMProvider):
         question: str,
         history: list | None = None,
         context_mode: str = "RAG"
-    ) -> str:
+    ) -> tuple[str, bool]:
         """
         Invokes completions endpoint.
 
@@ -106,7 +196,7 @@ class GroqProvider(LLMProvider):
             question (str): User question.
 
         Returns:
-            str: Grounded answer.
+            tuple[str, bool]: Grounded answer and whether preflight trimming occurred.
         """
         try:
             client = self._get_client()
@@ -127,6 +217,8 @@ class GroqProvider(LLMProvider):
         messages.append(
             {"role": "user", "content": f"DOCUMENT CONTEXT:\n{context}\n\nUSER QUESTION: {question}"}
         )
+
+        messages, preflight_truncated = _preflight_trim_messages(messages)
 
         request_payload = {
             "messages": messages,
@@ -186,7 +278,7 @@ class GroqProvider(LLMProvider):
             if not answer:
                 raise ValueError("Groq returned empty text content in completion message.")
 
-            return answer
+            return answer, preflight_truncated
 
         except APITimeoutError as err:
             logger.error("Groq API request timed out: %s", str(err))
@@ -227,7 +319,7 @@ class GroqProvider(LLMProvider):
             if err.status_code == 413:
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail="Document context too large for the AI model — try a more specific question or a shorter document."
+                    detail=PAYLOAD_TOO_LARGE_DETAIL,
                 )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,

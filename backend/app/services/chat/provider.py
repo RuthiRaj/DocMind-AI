@@ -21,7 +21,7 @@ class LLMProvider(ABC):
         question: str,
         history: list | None = None,
         context_mode: str = "RAG"
-    ) -> str:
+    ) -> tuple[str, bool]:
         """
         Submits system context and query variables to the LLM backend for completions.
 
@@ -32,7 +32,8 @@ class LLMProvider(ABC):
             history (list | None): Optional list of prior conversation turn dicts [{role, content}].
 
         Returns:
-            str: Generated completion text.
+            tuple[str, bool]: Generated completion text and whether the provider
+                trimmed history/context to fit the preflight token budget.
         """
         pass
 

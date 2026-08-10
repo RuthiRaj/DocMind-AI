@@ -18,6 +18,7 @@ interface BackendChatResponse {
   document_id: string;
   sources?: BackendSource[];
   session_id?: string;
+  context_truncated?: boolean;
 }
 
 export async function sendChatMessage(
@@ -41,6 +42,7 @@ export async function sendChatMessage(
 
   return {
     answer: data.answer,
+    contextTruncated: data.context_truncated ?? false,
     citations: (data.sources || []).map((source: BackendSource) => ({
       chunk_id: source.chunk_id,
       document_id: data.document_id,

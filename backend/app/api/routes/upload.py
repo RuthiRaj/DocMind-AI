@@ -17,7 +17,7 @@ upload_service = PDFUploadService()
     response_model=UploadSuccessResponse,
     status_code=status.HTTP_200_OK,
     summary="Upload PDF Document",
-    description="Accepts a single PDF file (max 10 MB), validates extension and MIME type, and stores it with a unique UUID.",
+    description="Accepts a single PDF file (max 20 MB), validates extension and MIME type, and stores it with a unique UUID.",
     responses={
         200: {
             "model": UploadSuccessResponse,
@@ -29,7 +29,7 @@ upload_service = PDFUploadService()
         },
         413: {
             "model": HTTPErrorDetail,
-            "description": "Payload Too Large (file size exceeds 10 MB)"
+            "description": "Payload Too Large (file size exceeds 20 MB)"
         },
         500: {
             "model": HTTPErrorDetail,
