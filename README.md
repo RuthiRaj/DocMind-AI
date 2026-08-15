@@ -81,6 +81,8 @@ DocMind AI/
 │   │   ├── schemas/                    # Pydantic request/response data models
 │   │   ├── services/                   # Ingestion, chunking, embedding, RAG, & management
 │   │   └── utils/                      # Formatting helpers & utilities
+│   ├── scripts/                        # Operational & Admin Scripts
+│   │   └── migrate_v2_documents.py     # Batch admin migration script for V2 upgrades
 │   ├── .env.example                    # Environment variable configuration template
 │   └── requirements.txt                # Python backend dependencies
 ├── frontend/                           # Next.js 16 / React 19 Frontend Application
@@ -89,8 +91,7 @@ DocMind AI/
 │   ├── services/                       # API integration services
 │   ├── package.json                    # Frontend dependencies
 │   └── .env.local.example              # Frontend environment template
-├── scripts/                            # Operational & Admin Scripts
-│   └── migrate_v2_documents.py         # Batch admin migration script for V2 upgrades
+├── LICENSE                             # MIT License
 └── README.md                           # Documentation & quickstart guide
 ```
 
