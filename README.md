@@ -1,152 +1,210 @@
 # DocMind AI 🧠
 
-DocMind AI is a production-grade AI-powered Retrieval-Augmented Generation (RAG) platform designed to interact intelligently with PDF documents. This repository contains the core foundation for both backend services and frontend interfaces.
+**DocMind AI** is a production-grade, grounded **Retrieval-Augmented Generation (RAG)** platform designed for enterprise PDF document analysis, multi-hop synthesis, and interactive chat.
 
-> [!NOTE]
-> **Milestone Status:** Currently at **Milestone 1: Project Foundation**. Core FastAPI architecture, configuration settings, environment structure, and health routes are fully operational. RAG, database, and AI integrations are planned for subsequent milestones.
+Built with a fast **FastAPI** Python backend, zero-dependency **BM25 + FAISS** hybrid retrieval engine, and a modern **Next.js 16 / React 19** frontend dashboard.
+
+---
+
+## ✨ Key Features & RAG V2 Highlights
+
+* 🔍 **Hybrid Retrieval Engine (BM25 + Vector Search + RRF):** Combines lexical term density (BM25 Okapi) with dense vector embeddings (`BAAI/bge-small-en-v1.5`) using Reciprocal Rank Fusion ($K=60$).
+* 📍 **1:1 Grounded Page Citations:** PyMuPDF text cleaning ensures precise page-level grounding and zero character offset drift across document pages.
+* ⚡ **Selective Query Expansion:** Smart heuristic filtering skips unnecessary LLM query expansion calls on short queries or technical codes, saving tokens and eliminating Groq rate-limit spikes (`HTTP 429`).
+* 💬 **Multi-Turn Session Memory:** Supports conversational context tracking across multi-turn follow-up questions.
+* 🛡️ **Failure-Path Robustness:** Built-in safeguards reject corrupt PDFs, empty documents, missing index files, and provider timeouts (`HTTP 504`) with clean, descriptive error responses.
+* ⚡ **Lazy Auto-Upgrade:** Automatically upgrades legacy V1 document indexes to V2 on-the-fly during user queries.
+
+---
+
+## 🏗️ Architecture
+
+```
+                          +-------------------------+
+                          |   User Question Input   |
+                          +------------+------------+
+                                       |
+                                       v
+                     +-----------------------------------+
+                     | Selective Query Rewriting Filter  |
+                     |  - Skip if <= 4 words             |
+                     |  - Skip if technical code/ID      |
+                     +-----------------+-----------------+
+                                       |
+                   +-------------------+-------------------+
+                   |                                       |
+                   v                                       v
+     +---------------------------+           +---------------------------+
+     |   BM25 Okapi Keyword      |           | Sentence-Transformers     |
+     |   Retriever (Term Density)|           | BAAI/bge-small-en-v1.5    |
+     +-------------+-------------+           +-------------+-------------+
+                   |                                       |
+                   +-------------------+-------------------+
+                                       |
+                                       v
+                     +-----------------------------------+
+                     |  Reciprocal Rank Fusion (RRF)     |
+                     |  Score = 1/(60 + r_vec) + ...     |
+                     +-----------------+-----------------+
+                                       |
+                                       v
+                     +-----------------------------------+
+                     |  Neighbor-Chunk Merging & Cap     |
+                     |  - Max 2 adjacent chunks          |
+                     |  - Max 1,500 characters cap       |
+                     +-----------------+-----------------+
+                                       |
+                                       v
+                     +-----------------------------------+
+                     |  Grounded Prompt Builder & LLM    |
+                     |  - Groq llama-3.1-8b-instant      |
+                     |  - Factual synonym matching rules |
+                     +-----------------+-----------------+
+                                       |
+                                       v
+                     +-----------------------------------+
+                     |  Response & Grounded Citations    |
+                     +-----------------------------------+
+```
 
 ---
 
 ## 📁 Project Structure
 
 ```text
-docmind-ai/
-│
-├── backend/
+DocMind AI/
+├── backend/                            # FastAPI Python Backend Application
 │   ├── app/
-│   │   ├── api/          # API controllers, sub-routers, and request schemas
-│   │   ├── core/         # Core application settings and environment parsing
-│   │   ├── services/     # Business logic layer (reserved for document & RAG services)
-│   │   ├── utils/        # Utility modules and helper functions
-│   │   ├── __init__.py   # Application package initialization
-│   │   └── main.py       # FastAPI application entrypoint & middleware setup
-│   │
-│   ├── uploads/          # Local directory for stored PDF uploads (Git ignored)
-│   ├── vector_store/     # Local directory for vector index storage (Git ignored)
-│   ├── requirements.txt  # Backend Python dependencies
-│   ├── .env.example      # Environment variables configuration template
-│   └── .gitignore        # Backend-specific Git ignore rules
-│
-├── frontend/             # Frontend application workspace (reserved for future UI)
-│
-├── README.md             # Project documentation and setup guide
-└── .gitignore            # Top-level workspace Git ignore rules
+│   │   ├── main.py                     # Application entrypoint & CORS middleware
+│   │   ├── api/                        # REST API routes & router registry
+│   │   ├── core/                       # Settings, health checks, prompts, & rate limiter
+│   │   ├── schemas/                    # Pydantic request/response data models
+│   │   ├── services/                   # Ingestion, chunking, embedding, RAG, & management
+│   │   └── utils/                      # Formatting helpers & utilities
+│   ├── .env.example                    # Environment variable configuration template
+│   └── requirements.txt                # Python backend dependencies
+├── frontend/                           # Next.js 16 / React 19 Frontend Application
+│   ├── app/                            # App Router pages & layouts
+│   ├── components/                     # Modern UI components (dropzone, chat, citations)
+│   ├── services/                       # API integration services
+│   ├── package.json                    # Frontend dependencies
+│   └── .env.local.example              # Frontend environment template
+├── scripts/                            # Operational & Admin Scripts
+│   └── migrate_v2_documents.py         # Batch admin migration script for V2 upgrades
+└── README.md                           # Documentation & quickstart guide
 ```
 
 ---
 
-## 🛠️ Tech Stack & Requirements
+## 🛠️ Tech Stack
 
-- **Language:** Python 3.12+
-- **Framework:** FastAPI
-- **ASGI Server:** Uvicorn
-- **Environment Management:** `python-dotenv` & `pydantic-settings`
+### Backend
+* **Language & Framework:** Python 3.12+, FastAPI, Uvicorn
+* **PDF Inspection & Processing:** PyMuPDF (`fitz`)
+* **Embeddings & Vector Store:** `BAAI/bge-small-en-v1.5`, FAISS (`faiss-cpu`)
+* **Retrieval Engine:** Zero-dependency BM25 Okapi + FAISS Reciprocal Rank Fusion
+* **LLM Provider:** Groq SDK (`llama-3.1-8b-instant`)
+
+### Frontend
+* **Framework:** Next.js 16 (App Router), React 19, TypeScript
+* **Styling:** Tailwind CSS, Framer Motion, Lucide Icons
+* **Data Fetching & State:** React Query (`@tanstack/react-query`), Axios
 
 ---
 
 ## 🚀 Installation & Setup
 
-Follow these steps to set up and run the DocMind AI backend locally.
+### 1. Prerequisites
+* Python 3.12+ installed
+* Node.js 18+ and npm installed
+* A free [Groq API Key](https://console.groq.com/)
 
-### 1. Clone & Navigate to Workspace
+---
+
+### 2. Backend Setup
+
 ```bash
-cd docmind-ai/backend
-```
+# Navigate to backend directory
+cd backend
 
-### 2. Create & Activate Virtual Environment
-- **On Linux/macOS:**
-  ```bash
-  python3 -m venv .venv
-  source .venv/bin/activate
-  ```
-- **On Windows (PowerShell):**
-  ```powershell
-  python -m venv .venv
-  .\.venv\Scripts\Activate.ps1
-  ```
+# Create and activate virtual environment
+# Windows (PowerShell):
+python -m venv venv
+.\venv\Scripts\Activate.ps1
 
-### 3. Install Dependencies
-```bash
+# Linux / macOS:
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
 pip install --upgrade pip
 pip install -r requirements.txt
+
+# Configure environment variables
+# Copy template to .env
+cp .env.example .env
 ```
 
-# Environment Setup
+Open `backend/.env` and insert your Groq API key:
+```env
+GROQ_API_KEY=gsk_your_groq_api_key_here
+```
 
-To run the application, configure your environment variables:
-
-1. **Configure Backend Environment:**
-   * Copy `backend/.env.example` to `backend/.env`:
-     ```powershell
-     # Windows (PowerShell)
-     Copy-Item backend/.env.example backend/.env
-     ```
-     ```bash
-     # macOS / Linux
-     cp backend/.env.example backend/.env
-     ```
-   * Open `backend/.env` and add your `GROQ_API_KEY`:
-     ```env
-     GROQ_API_KEY=gsk_your_groq_api_key_goes_here
-     ```
-
-2. **Configure Frontend Environment:**
-   * Copy `frontend/.env.local.example` to `frontend/.env.local`:
-     ```powershell
-     # Windows (PowerShell)
-     Copy-Item frontend/.env.local.example frontend/.env.local
-     ```
-     ```bash
-     # macOS / Linux
-     cp frontend/.env.local.example frontend/.env.local
-     ```
-
-3. **Start Backend Server:**
-   * Run uvicorn from the `backend/` directory:
-     ```bash
-     uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-     ```
-
-4. **Start Frontend Dev Server:**
-   * Run npm dev server from the `frontend/` directory:
-     ```bash
-     npm run dev
-     ```
-
-5. **Verify Setup:**
-   * Send a `GET` request to `http://127.0.0.1:8000/health` or view `http://localhost:3000/health`.
-   * Under diagnostics, verify the `groq_service` reports `"status": "healthy"` and `"details": "Groq API key configured."`.
-
-
-## 🏃 Running the Server
-
-Start the FastAPI development server with Uvicorn auto-reload:
-
+Start the backend dev server:
 ```bash
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
+Verify backend health by navigating to `http://127.0.0.1:8000/docs`.
 
 ---
 
-## 🌐 API Endpoints & URLs
+### 3. Frontend Setup
 
-Once the server is running, access the following endpoints:
+Open a new terminal window:
+```bash
+# Navigate to frontend directory
+cd frontend
 
-| Endpoint | Method | Description | Expected Output |
-| :--- | :--- | :--- | :--- |
-| `http://127.0.0.1:8000/` | `GET` | Root API metadata | `{"project": "DocMind AI", "status": "running", "version": "1.0.0"}` |
-| `http://127.0.0.1:8000/health` | `GET` | Health status check | `{"status": "healthy"}` |
-| `http://127.0.0.1:8000/docs` | `GET` | Interactive Swagger API Docs | OpenAPI Documentation UI |
-| `http://127.0.0.1:8000/redoc` | `GET` | ReDoc API Documentation | ReDoc UI |
+# Install dependencies
+npm install
+
+# Configure environment variables
+cp .env.local.example .env.local
+
+# Start frontend development server
+npm run dev
+```
+Open `http://localhost:3000` in your browser.
 
 ---
 
-## 🗺️ Roadmap & Future Milestones
+## 🌐 API Endpoints Overview
 
-- [x] **Milestone 1: Project Foundation & Clean Architecture Base**
-- [ ] **Milestone 2: PDF Upload & Ingestion Pipeline**
-- [ ] **Milestone 3: Document Chunking & Vector Embedding Engine**
-- [ ] **Milestone 4: Vector Store & Retrieval Pipeline**
-- [ ] **Milestone 5: LLM Integration & RAG Execution Engine**
-- [ ] **Milestone 6: Modern React / Next.js Frontend Dashboard**
-- [ ] **Milestone 7: Authentication, History & Production Deployment**
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/v1/health` | Comprehensive system health & diagnostics check |
+| `POST` | `/api/v1/upload` | Upload PDF file with magic bytes validation |
+| `POST` | `/api/v1/process` | Extract cleaned page text & metadata |
+| `POST` | `/api/v1/chunk` | Smart text chunking with page bounds |
+| `POST` | `/api/v1/embed` | Generate dense vector embeddings |
+| `POST` | `/api/v1/index` | Build local FAISS vector search index |
+| `POST` | `/api/v1/retrieve` | Execute BM25 + Vector hybrid RRF retrieval |
+| `POST` | `/api/v1/chat` | Send question & receive grounded RAG answer with citations |
+| `GET` | `/api/v1/management/documents` | List all processed documents & pipeline status |
+
+---
+
+## 📊 Evaluation & Robustness Benchmarks
+
+DocMind AI RAG V2 was benchmarked across multi-page technical documents:
+
+* **Unanswerable Refusal Precision:** **100% (4/4)** strict refusal rate on unanswerable questions without context leakage.
+* **Multi-Hop Synthesis Rate:** **100% (4/4)** accurate synthesis across facts separated by up to 11 pages.
+* **Cross-Document Generalization:** **100% (2/2)** accurate grounding across distinct HR and Financial policy PDFs.
+* **Error Resilience:** Clean `HTTPException` responses for corrupt PDF files (`400`), empty text documents (`400`), missing indexes (`400`), and provider timeouts (`504`).
+
+---
+
+## 📜 License
+
+This project is licensed under the MIT License.

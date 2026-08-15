@@ -38,6 +38,19 @@ class PDFProcessingService:
         else:
             self.target_dir = target_dir
 
+    def _clean_text(self, raw_text: str) -> str:
+        """
+        Cleans and normalizes text so extracted_text.txt and pages.json
+        share identical character offsets.
+        """
+        import re
+        text = raw_text.replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+        text = re.sub(r" ?\n ?", "\n", text)
+        text = re.sub(r"\n\n+", "\n\n", text)
+        return text.strip()
+
     def _write_atomic(self, target_path: Path, content: any, is_string: bool = False) -> None:
         """
         Atomically writes content to disk using temporary swap path.
@@ -225,7 +238,8 @@ class PDFProcessingService:
 
                 for page_index in range(total_pages):
                     page = doc.load_page(page_index)
-                    page_text = page.get_text() or ""
+                    raw_page_text = page.get_text() or ""
+                    page_text = self._clean_text(raw_page_text)
                     page_len = len(page_text)
 
                     if not page_text.strip():
@@ -278,6 +292,7 @@ class PDFProcessingService:
                 # Save metadata to uploads/<document_id>/metadata.json atomically
                 metadata_payload = {
                     "document_id": safe_doc_id,
+                    "pipeline_version": 2,
                     "filename": display_filename,
                     "total_pages": total_pages,
                     "title": title,

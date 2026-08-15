@@ -6,7 +6,8 @@ semantic retrieval coverage across varied document vocabulary.
 """
 
 import logging
-from typing import List
+import re
+from typing import List, Tuple
 
 from app.core.config import settings
 from app.core.rate_limit import groq_token_window
@@ -15,27 +16,44 @@ logger = logging.getLogger(__name__)
 
 # Compact system prompt for query expansion — optimized for low token usage
 _REWRITE_SYSTEM_PROMPT = (
-    "Rewrite the user's question into exactly 2 alternative phrasings. "
-    "Use different vocabulary and sentence structure but preserve the exact same intent. "
+    "Rewrite the user's question into exactly 2 alternative technical search phrasings. "
+    "Map colloquial or indirect terms to standard technical documentation terms (e.g. 'RAM' -> 'memory allocation limit', 'execution thread' -> 'worker thread', 'failover port' -> 'routing port'). "
     "Output ONLY the 2 rewrites, one per line, no numbering, no extra text."
 )
 
 
+def should_rewrite(query: str) -> Tuple[bool, str]:
+    """
+    Evaluates whether a query requires LLM query expansion based on heuristics.
+    """
+    if not getattr(settings, "ENABLE_SELECTIVE_QUERY_REWRITING", True):
+        return True, "Selective query rewriting disabled in config."
+
+    words = query.strip().split()
+    min_words = getattr(settings, "REWRITE_MIN_WORD_COUNT", 5)
+    if len(words) < min_words:
+        return False, f"Query word count ({len(words)}) is below threshold ({min_words})."
+
+    # Skip exact technical codes/keys (e.g. DB-PROD-9982, port 443)
+    if re.search(r"\b[A-Z]{2,}-\w+-\d+\b", query) or re.search(r"\b(port|key|id|code|v2|ip)\s*[:=]?\s*\w+\b", query, re.IGNORECASE):
+        return False, "Query contains exact technical entity or code identifier."
+
+    return True, "Query qualified for LLM expansion."
+
+
 def rewrite_query(original_query: str) -> List[str]:
     """
-    Generates 2 alternate phrasings of the user's query using the Groq LLM.
+    Generates 2 alternate phrasings of the user's query using the Groq LLM if qualified.
 
-    Falls back gracefully to returning only the original query if the LLM call
-    fails, times out, or produces unusable output.
-
-    Args:
-        original_query (str): The user's original search query.
-
-    Returns:
-        List[str]: List of queries — always starts with the original, followed
-                   by 0-2 rewrites depending on success.
+    Falls back gracefully to returning only the original query if skipped or failed.
     """
     queries = [original_query]
+
+    # Evaluate selective query rewriting heuristic filter
+    qualified, reason = should_rewrite(original_query)
+    if not qualified:
+        logger.info("Query rewriter skipped for query '%s': %s", original_query[:50], reason)
+        return queries
 
     try:
         from app.services.chat.groq_provider import GroqProvider

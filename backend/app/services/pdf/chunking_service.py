@@ -79,18 +79,20 @@ class ChunkingService:
 
         start_page = pages_meta[0]["page"]
         end_page = pages_meta[-1]["page"]
+        found_start = False
 
         for meta in pages_meta:
             page_num = meta["page"]
             p_start = meta["start_character"]
             p_end = meta["end_character"]
 
-            if p_start <= start_char <= p_end:
+            if not found_start and p_start <= start_char <= p_end:
                 start_page = page_num
+                found_start = True
             if p_start <= end_char <= p_end:
                 end_page = page_num
                 break
-            if start_char >= p_start:
+            if end_char >= p_start:
                 end_page = page_num
 
         return (start_page, max(start_page, end_page))

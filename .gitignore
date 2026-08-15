@@ -11,6 +11,7 @@ venv/
 ENV/
 env/
 __pycache__/
+.pytest_cache/
 *.pyc
 *.py[cod]
 
@@ -37,6 +38,7 @@ desktop.ini
 logs/
 .antigravity/
 scratch/
+backend/scratch/
 
 # Uploaded Files & Generated Vector Storage Data
 uploads/

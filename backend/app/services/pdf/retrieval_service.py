@@ -20,6 +20,8 @@ from app.schemas.retrieval import RetrievalRequest, RetrievalResponse, Retrieval
 from app.services.embeddings.sentence_transformer_provider import SentenceTransformerProvider
 from app.services.retrieval.provider import RetrievalProvider
 from app.services.retrieval.faiss_provider import FaissRetrievalProvider
+from app.services.retrieval.bm25_provider import BM25Retriever
+from app.services.retrieval.reranker import ScoreFusionReranker
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +110,52 @@ class RetrievalService:
                 )
 
         return status_data
+
+    def check_and_lazy_upgrade(self, document_id: str) -> bool:
+        """
+        Checks if document requires V2 pipeline upgrade and executes lazy reprocessing if needed.
+        """
+        safe_doc_id = Path(document_id).name
+        doc_dir = self.target_dir / safe_doc_id
+        metadata_path = doc_dir / "metadata.json"
+
+        if not metadata_path.exists():
+            return False
+
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as mf:
+                meta = json.load(mf)
+            version = meta.get("pipeline_version", 1)
+            if version < 2:
+                logger.info("Lazy upgrading document '%s' from V%s to V2...", safe_doc_id, version)
+                from app.services.pdf.processing_service import PDFProcessingService
+                from app.services.pdf.chunking_service import ChunkingService
+                from app.services.pdf.embedding_service import EmbeddingService
+                from app.services.pdf.indexing_service import IndexingService
+
+                import asyncio
+                import concurrent.futures
+
+                async def _do_upgrade():
+                    await PDFProcessingService().process_pdf(safe_doc_id, force=True)
+                    await ChunkingService().chunk_document(safe_doc_id, force=True)
+                    await EmbeddingService().generate_document_embeddings(safe_doc_id, force=True)
+                    await IndexingService().generate_document_index(safe_doc_id, force=True)
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(lambda: asyncio.run(_do_upgrade()))
+                            future.result()
+                    else:
+                        asyncio.run(_do_upgrade())
+                except Exception:
+                    asyncio.run(_do_upgrade())
+                return True
+        except Exception as e:
+            logger.warning("Lazy upgrade check failed for document '%s': %s", safe_doc_id, str(e))
+        return False
 
     def _validate_request(self, query: str, top_k: int) -> None:
         """
@@ -259,6 +307,7 @@ class RetrievalService:
 
         # 2. Pipeline State Check
         self._validate_pipeline(status_path)
+        self.check_and_lazy_upgrade(safe_doc_id)
 
         # 3. Request Boundary Validation
         self._validate_request(query, top_k)
@@ -383,8 +432,50 @@ class RetrievalService:
 
             initial_candidates.append((score, chunk))
 
+        # BM25 + Vector Hybrid Search Fusion (if enabled)
+        if settings.ENABLE_HYBRID_SEARCH and initial_candidates:
+            try:
+                bm25_retriever = BM25Retriever(k1=settings.BM25_K1, b=settings.BM25_B)
+                bm25_scored = bm25_retriever.search(query, chunks_data, top_k=top_k * 2)
+
+                vec_rankings = [(cand[1].get("chunk_id"), cand[0]) for cand in initial_candidates]
+                bm25_rankings = [(cand[0].get("chunk_id") if isinstance(cand[0], dict) else getattr(cand[0], "chunk_id"), cand[1]) for cand in bm25_scored]
+
+                rrf_scores = BM25Retriever.reciprocal_rank_fusion(vec_rankings, bm25_rankings, rrf_k=settings.RRF_K)
+
+                combined_chunks = {}
+                for cand in initial_candidates:
+                    cid = cand[1].get("chunk_id")
+                    combined_chunks[cid] = (cand[1], cand[0])
+                for cand in bm25_scored:
+                    chunk_obj = cand[0]
+                    cid = chunk_obj.get("chunk_id") if isinstance(chunk_obj, dict) else getattr(chunk_obj, "chunk_id")
+                    if cid not in combined_chunks:
+                        combined_chunks[cid] = (chunk_obj, 0.40)
+
+                hybrid_candidates = []
+                for cid, (chunk_obj, v_score) in combined_chunks.items():
+                    fused_rrf = rrf_scores.get(cid, 0.0)
+                    combined_score = max(v_score, 0.45) if cid in rrf_scores else v_score
+                    hybrid_candidates.append((combined_score, chunk_obj, fused_rrf))
+
+                hybrid_candidates.sort(key=lambda x: (x[2], x[0]), reverse=True)
+                initial_candidates = [(score, chunk_obj) for score, chunk_obj, rrf in hybrid_candidates]
+                logger.info("Hybrid Search (BM25 + RRF) completed: fused %d candidates", len(initial_candidates))
+            except Exception as h_err:
+                logger.warning("Hybrid search execution failed (falling back to vector search): %s", str(h_err))
+
         # Filter scores below similarity threshold (absolute check)
         valid_candidates = [cand for cand in initial_candidates if cand[0] >= settings.MIN_SIMILARITY_SCORE]
+
+        # Apply Score Fusion Reranking pass (if enabled)
+        if settings.ENABLE_RERANKER and valid_candidates:
+            try:
+                reranker = ScoreFusionReranker()
+                valid_candidates = reranker.rerank(query, valid_candidates, top_k=settings.RERANKER_TOP_K)
+                logger.info("Score Fusion Reranker pass completed: reranked %d candidates", len(valid_candidates))
+            except Exception as r_err:
+                logger.warning("Reranker pass failed (falling back to un-reranked candidates): %s", str(r_err))
 
         # Apply Adaptive Top-K Retrieval
         filtered_candidates = []
@@ -438,46 +529,60 @@ class RetrievalService:
             
         filter_time_ms = int(round((time.perf_counter() - filter_start) * 1000))
 
-        # Merge Neighboring Chunks
+        # Merge Neighboring Chunks (if enabled, subject to configurable limits)
         merge_start = time.perf_counter()
-        # Sort by chunk_index ascending to find sequential neighbors
         sorted_results = sorted(filtered_results, key=lambda x: x.chunk_index)
         merged_results = []
         
-        for res in sorted_results:
-            if not merged_results:
-                merged_results.append(res)
-            else:
-                last_res = merged_results[-1]
-                # Check merge conditions: sequential indices AND same page OR adjacent page
-                current_last_idx = (
-                    last_res.last_chunk_index
-                    if last_res.last_chunk_index is not None
-                    else last_res.chunk_index
-                )
-                index_diff = abs(res.chunk_index - current_last_idx)
-                page_overlap = (
-                    abs(res.start_page - last_res.end_page) <= 1 or
-                    abs(res.end_page - last_res.start_page) <= 1
-                )
-                
-                if index_diff == 1 and page_overlap:
-                    # Merge current res into last_res
-                    last_res.text = last_res.text + "\n\n" + res.text
-                    last_res.last_chunk_index = res.chunk_index
-                    last_res.start_page = min(last_res.start_page, res.start_page)
-                    last_res.end_page = max(last_res.end_page, res.end_page)
-                    last_res.score = max(last_res.score, res.score)
-                    
-                    # Update other metadata fields
-                    last_res.sentence_count += res.sentence_count
-                    last_res.estimated_tokens += res.estimated_tokens
-                    last_res.character_count = len(last_res.text)
-                    last_res.word_count = len(last_res.text.split())
-                    last_res.start_character = min(last_res.start_character, res.start_character)
-                    last_res.end_character = max(last_res.end_character, res.end_character)
+        if not settings.ENABLE_NEIGHBOR_MERGING:
+            merged_results = [r.model_copy() for r in sorted_results]
+        else:
+            for res in sorted_results:
+                if not merged_results:
+                    res_copy = res.model_copy()
+                    setattr(res_copy, "_merged_count", 1)
+                    merged_results.append(res_copy)
                 else:
-                    merged_results.append(res)
+                    last_res = merged_results[-1]
+                    current_last_idx = (
+                        last_res.last_chunk_index
+                        if last_res.last_chunk_index is not None
+                        else last_res.chunk_index
+                    )
+                    index_diff = abs(res.chunk_index - current_last_idx)
+                    page_overlap = (
+                        abs(res.start_page - last_res.end_page) <= 1 or
+                        abs(res.end_page - last_res.start_page) <= 1
+                    )
+                    
+                    merged_count = getattr(last_res, "_merged_count", 1)
+                    projected_len = len(last_res.text) + 2 + len(res.text)
+                    
+                    if (
+                        index_diff == 1 
+                        and page_overlap 
+                        and merged_count < settings.MAX_MERGED_CHUNKS 
+                        and projected_len <= settings.MAX_MERGED_CHUNK_CHARS
+                    ):
+                        # Merge current res into last_res
+                        last_res.text = last_res.text + "\n\n" + res.text
+                        last_res.last_chunk_index = res.chunk_index
+                        last_res.start_page = min(last_res.start_page, res.start_page)
+                        last_res.end_page = max(last_res.end_page, res.end_page)
+                        last_res.score = max(last_res.score, res.score)
+                        setattr(last_res, "_merged_count", merged_count + 1)
+                        
+                        # Update metadata fields
+                        last_res.sentence_count += res.sentence_count
+                        last_res.estimated_tokens += res.estimated_tokens
+                        last_res.character_count = len(last_res.text)
+                        last_res.word_count = len(last_res.text.split())
+                        last_res.start_character = min(last_res.start_character, res.start_character)
+                        last_res.end_character = max(last_res.end_character, res.end_character)
+                    else:
+                        res_copy = res.model_copy()
+                        setattr(res_copy, "_merged_count", 1)
+                        merged_results.append(res_copy)
 
         # Re-sort back by similarity score descending for ranking, and reassign rank counters
         merged_results.sort(key=lambda x: x.score, reverse=True)

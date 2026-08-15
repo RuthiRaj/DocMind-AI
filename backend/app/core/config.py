@@ -64,6 +64,17 @@ class Settings(BaseSettings):
     MIN_SIMILARITY_SCORE: float = 0.40  # Minimum vector similarity threshold score
     ADAPTIVE_SCORE_DROP_LIMIT: float = 0.20  # Limit cutoff difference for adaptive top-k pruning
     MAX_QUERY_LENGTH: int = 2000  # Maximum length of user query query string to prevent resource exhaustion
+    ENABLE_NEIGHBOR_MERGING: bool = True  # Enable adjacent chunk merging
+    MAX_MERGED_CHUNKS: int = 2  # Max consecutive chunks allowed in a merged block
+    MAX_MERGED_CHUNK_CHARS: int = 1500  # Max total characters allowed in a merged block
+    ENABLE_HYBRID_SEARCH: bool = True  # Enable BM25 + Vector Hybrid Retrieval
+    BM25_K1: float = 1.5  # Term frequency saturation parameter
+    BM25_B: float = 0.75  # Length normalization parameter
+    RRF_K: int = 60  # Reciprocal Rank Fusion constant
+    ENABLE_RERANKER: bool = True  # Enable cross-scoring reranking pass
+    RERANKER_TOP_K: int = 10  # Maximum candidate chunks to retain after reranking
+    ENABLE_SELECTIVE_QUERY_REWRITING: bool = True  # Selectively trigger LLM query expansion
+    REWRITE_MIN_WORD_COUNT: int = 5  # Minimum word count required to trigger query rewriter LLM
     RETRIEVAL_VERSION: str = "1.0"  # Version of the retrieval engine schema
 
     # AI Chat (RAG) Engine Configuration Settings
