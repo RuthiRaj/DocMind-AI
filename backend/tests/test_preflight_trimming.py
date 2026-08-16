@@ -74,7 +74,7 @@ class TestChatServicePreflightTrim:
     def test_multi_turn_history_and_near_full_context_document_stays_within_budget(
         self, chat_service: ChatService, monkeypatch: pytest.MonkeyPatch
     ):
-        monkeypatch.setattr(settings, "GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET", 5000)
+        monkeypatch.setattr(settings, "GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET", 2500)
 
         system_prompt = PromptBuilder.get_system_prompt()
         question = "Summarize the methodology and list the three main conclusions."
@@ -198,7 +198,7 @@ class TestGroqProviderPreflightTrim:
     def test_preflight_messages_never_exceed_budget_with_long_history_and_context(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        monkeypatch.setattr(settings, "GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET", 5000)
+        monkeypatch.setattr(settings, "GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET", 3000)
 
         system_prompt = PromptBuilder.get_system_prompt()
         question = "What changed between section 2 and section 4?"
@@ -234,7 +234,7 @@ class TestGroqProviderPreflightTrim:
         self, monkeypatch: pytest.MonkeyPatch
     ):
         """Second generate() must not inherit context_truncated=True from a prior trimmed call."""
-        monkeypatch.setattr(settings, "GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET", 5000)
+        monkeypatch.setattr(settings, "GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET", 3000)
 
         mock_client = MagicMock()
         mock_completion = MagicMock()

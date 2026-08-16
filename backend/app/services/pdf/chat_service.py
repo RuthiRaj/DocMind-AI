@@ -262,13 +262,14 @@ class ChatService:
 
     async def answer_question(self, document_id: str, request: ChatRequest) -> ChatResponse:
         """
-        Retrieves context segments and coordinates generation from the LLM provider.
-        Routes to full-context mode for small documents or RAG mode for large ones.
-        Includes session-scoped conversation memory for multi-turn follow-ups.
+        Orchestrates the authoritative production RAG question-answering pipeline:
+        1. Validate pipeline artifacts & request boundaries
+        2. Load conversation history
+        3. Semantic retrieval via RetrievalService (BM25 + FAISS + RRF + Reranker + Neighbor Merging)
+        4. Strict context bounding (max chunks, max characters, preflight token trimming)
+        5. Grounded LLM generation via Groq
+        6. Citation construction exclusively from surviving context chunks (no regex extraction)
         """
-        import re as _re
-
-        # 1. Generate Request ID and resolve session ID
         request_id = str(uuid.uuid4())
         session_id = request.session_id if request.session_id else str(uuid.uuid4())
         safe_doc_id = Path(document_id).name
@@ -277,17 +278,20 @@ class ChatService:
         stats_path = doc_dir / "chat_statistics.json"
 
         logger.info(
-            "[Request: %s] Chat query received for document_id '%s' (session: %s)",
+            "[REQUEST] request_id=%s document_id='%s' session_id=%s question='%s' top_k=%d",
             request_id,
             safe_doc_id,
-            session_id[:8]
+            session_id[:8],
+            request.question[:80],
+            request.top_k
         )
+        logger.info("[ROUTING] mode=RAG full_context_bypass=false")
         overall_start = time.perf_counter()
 
-        # 2 & 3. Validate Document Folder & Pipeline Completion
+        # 1. Validate Document Folder & Pipeline Completion
         if not doc_dir.exists():
             detail_msg = f"Document directory not found for document_id: {document_id}"
-            logger.error("[Request: %s] %s", request_id, detail_msg)
+            logger.error("[REQUEST: %s] %s", request_id, detail_msg)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=detail_msg
@@ -295,10 +299,10 @@ class ChatService:
 
         self._validate_pipeline(status_path)
 
-        # 4. Validate Request
+        # 2. Validate Request Boundaries
         self._validate_request(request.question, request.top_k)
 
-        # 5. Retrieve conversation history for this session
+        # 3. Retrieve conversation history for this session
         from app.services.chat.conversation_store import conversation_store
         history = conversation_store.get_history(
             document_id=safe_doc_id,
@@ -308,218 +312,14 @@ class ChatService:
         )
         if history:
             logger.info(
-                "[Request: %s] Conversation history loaded: %d messages from session %s",
+                "[REQUEST: %s] Conversation history loaded: %d messages from session %s",
                 request_id, len(history), session_id[:8]
             )
 
-        # 6. Document-size routing decision
-        full_text_path = doc_dir / "extracted_text.txt"
-        pages_path = doc_dir / "pages.json"
-
-        context_mode = "RAG"  # Default
-        full_text = None
-        pages_data = []
-
-        if full_text_path.exists():
-            try:
-                full_text = full_text_path.read_text(encoding="utf-8")
-                if pages_path.exists():
-                    with open(pages_path, "r", encoding="utf-8") as pf:
-                        pages_data = json.load(pf)
-
-                if history:
-                    logger.info(
-                        "[Request: %s] RAG mode selected — conversation history present (%d messages), FULL_CONTEXT disabled",
-                        request_id,
-                        len(history),
-                    )
-                elif len(full_text) > settings.FULL_CONTEXT_MAX_CHARS:
-                    logger.info(
-                        "[Request: %s] RAG mode selected — document is %d chars, exceeds char cap %d",
-                        request_id, len(full_text), settings.FULL_CONTEXT_MAX_CHARS
-                    )
-                else:
-                    full_context_system_prompt = PromptBuilder.get_full_context_system_prompt()
-                    full_context = PromptBuilder.compile_full_context(full_text, pages_data)
-                    estimated_context_tokens = int(
-                        (len(full_context) + settings.TOKEN_ESTIMATION_RATIO - 1)
-                        / settings.TOKEN_ESTIMATION_RATIO
-                    )
-                    safe_context_token_budget = self._context_token_budget(
-                        system_prompt=full_context_system_prompt,
-                        question=request.question,
-                        history=history
-                    )
-
-                    if estimated_context_tokens <= safe_context_token_budget:
-                        context_mode = "FULL_CONTEXT"
-                        logger.info(
-                            "[Request: %s] FULL_CONTEXT mode selected — document is %d chars (%d estimated tokens; budget: %d)",
-                            request_id, len(full_text), estimated_context_tokens, safe_context_token_budget
-                        )
-                    else:
-                        logger.info(
-                            "[Request: %s] RAG mode selected — document is %d estimated tokens, exceeds budget %d",
-                            request_id, estimated_context_tokens, safe_context_token_budget
-                        )
-            except Exception as err:
-                logger.warning(
-                    "[Request: %s] Failed to read extracted_text.txt, falling back to RAG mode: %s",
-                    request_id, str(err)
-                )
-
         fallback_msg = "I couldn't find enough information in this document to answer your question."
+        context_mode = "RAG"
 
-        # ── FULL-CONTEXT PATH ──
-        if context_mode == "FULL_CONTEXT":
-            retrieval_time_ms = 0
-
-            # Compile full document context with [Page N] markers
-            compiled_context = PromptBuilder.compile_full_context(full_text, pages_data)
-            system_prompt = PromptBuilder.get_full_context_system_prompt()
-            context_char_count = len(compiled_context)
-            logger.info("[Request: %s] Full-context prompt compiled (%d chars).", request_id, context_char_count)
-
-            _, _, compiled_context, context_truncated = self._preflight_trim_for_groq(
-                system_prompt=system_prompt,
-                question=request.question,
-                history=history if history else None,
-                compiled_context=compiled_context,
-            )
-            context_char_count = len(compiled_context)
-
-            # Call LLM with conversation history
-            generation_start = time.perf_counter()
-            try:
-                raw_answer, groq_truncated = self.provider.generate(
-                    system_prompt=system_prompt,
-                    context=compiled_context,
-                    question=request.question,
-                    history=history if history else None,
-                    context_mode=context_mode
-                )
-                if groq_truncated:
-                    context_truncated = True
-            except Exception as gen_err:
-                logger.exception("[Request: %s] LLM generation failed (FULL_CONTEXT)", request_id)
-                if isinstance(gen_err, HTTPException):
-                    raise
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Grounded AI response generation failure: {str(gen_err)}"
-                )
-
-            generation_time_ms = int(round((time.perf_counter() - generation_start) * 1000))
-            logger.info("[Request: %s] LLM generation completed in %d ms (FULL_CONTEXT).", request_id, generation_time_ms)
-
-            if not raw_answer or not raw_answer.strip():
-                logger.error("[Request: %s] Generated completion response is empty.", request_id)
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail="The AI provider returned an empty completion response."
-                )
-
-            answer = raw_answer.strip()
-
-            # Parse page citations from LLM response (e.g. "Page 5", "Pages 3-4", "page 12")
-            sources: List[SourceChunk] = []
-            cited_pages = set()
-            # Match patterns: "Page 5", "page 12", "Pages 3 and 5", "Pages 3-4", "Pages 3, 5"
-            page_matches = _re.findall(r'[Pp]ages?\s+(\d+(?:\s*(?:,|and|-|to)\s*\d+)*)', answer)
-            for match in page_matches:
-                # Extract all numbers from the match
-                numbers = _re.findall(r'\d+', match)
-                for n in numbers:
-                    cited_pages.add(int(n))
-
-            # Build source citations from cited pages
-            for page_num in sorted(cited_pages):
-                # Find the page's text segment from pages_data
-                page_text = ""
-                for page_info in pages_data:
-                    if page_info.get("page") == page_num:
-                        start = page_info.get("start_character", 0)
-                        end = page_info.get("end_character", len(full_text))
-                        page_text = full_text[start:end].strip()
-                        # Truncate for response payload (keep first 500 chars)
-                        if len(page_text) > 500:
-                            page_text = page_text[:500] + "..."
-                        break
-
-                sources.append(
-                    SourceChunk(
-                        chunk_id=f"{safe_doc_id}_page_{page_num:03d}",
-                        chunk_index=page_num,
-                        score=1.0,  # Full-context mode — full document was visible
-                        start_page=page_num,
-                        end_page=page_num,
-                        text=page_text
-                    )
-                )
-
-            # Store conversation turn
-            conversation_store.add_turn(safe_doc_id, session_id, request.question, answer)
-
-            overall_time_ms = int(round((time.perf_counter() - overall_start) * 1000))
-
-            # Token estimation
-            estimated_prompt_tokens = 0
-            estimated_completion_tokens = 0
-            if settings.ENABLE_TOKEN_ESTIMATION:
-                total_prompt_chars = len(system_prompt) + len(compiled_context) + len(request.question)
-                # Add conversation history token estimate
-                history_chars = sum(len(m.get("content", "")) for m in (history or []))
-                total_prompt_chars += history_chars
-                estimated_prompt_tokens = int(round(total_prompt_chars / 4))
-                estimated_completion_tokens = int(round(len(answer) / 4))
-            estimated_total_tokens = estimated_prompt_tokens + estimated_completion_tokens
-
-            # Persist stats
-            stats_payload = {
-                "request_id": request_id,
-                "session_id": session_id,
-                "context_mode": context_mode,
-                "provider": self.provider.provider_name(),
-                "model": self.provider.model_name(),
-                "processing_time_ms": overall_time_ms,
-                "retrieval_time_ms": retrieval_time_ms,
-                "generation_time_ms": generation_time_ms,
-                "question_length": len(request.question),
-                "context_chunks": 0,
-                "context_characters": context_char_count,
-                "estimated_prompt_tokens": estimated_prompt_tokens,
-                "estimated_completion_tokens": estimated_completion_tokens,
-                "estimated_total_tokens": estimated_total_tokens,
-                "returned_sources": len(sources),
-                "cited_pages": sorted(cited_pages),
-                "conversation_history_messages": len(history) if history else 0,
-                "chat_version": settings.CHAT_VERSION,
-                "system_prompt_version": settings.SYSTEM_PROMPT_VERSION,
-                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            }
-            try:
-                self._write_atomic(stats_path, stats_payload)
-                logger.info("[Request: %s] chat_statistics.json persisted.", request_id)
-            except Exception as err:
-                logger.warning("[Request: %s] Failed to write chat_statistics.json: %s", request_id, str(err))
-
-            return ChatResponse(
-                success=True,
-                document_id=safe_doc_id,
-                request_id=request_id,
-                question=request.question,
-                answer=answer,
-                provider=self.provider.provider_name(),
-                model=self.provider.model_name(),
-                processing_time_ms=overall_time_ms,
-                retrieval_time_ms=retrieval_time_ms,
-                generation_time_ms=generation_time_ms,
-                sources=sources,
-                session_id=session_id,
-                context_mode=context_mode,
-                context_truncated=context_truncated,
-            )
-        # 5r. Context Retrieval via existing RetrievalService
+        # 4. Context Retrieval via RetrievalService
         retrieval_start = time.perf_counter()
         try:
             retrieved_chunks = self.retrieval_service.retrieve(
@@ -529,7 +329,7 @@ class ChatService:
                 request_id=request_id
             )
         except Exception as ret_err:
-            logger.exception("[Request: %s] RetrievalService query execution failed", request_id)
+            logger.exception("[REQUEST: %s] RetrievalService query execution failed", request_id)
             if isinstance(ret_err, HTTPException):
                 raise
             raise HTTPException(
@@ -539,17 +339,17 @@ class ChatService:
 
         retrieval_time_ms = int(round((time.perf_counter() - retrieval_start) * 1000))
         logger.info(
-            "[Request: %s] Retrieval completed in %d ms. Chunks matching score limit: %d",
+            "[RETRIEVAL] request_id=%s time_ms=%d retrieved_candidates=%d",
             request_id,
             retrieval_time_ms,
             len(retrieved_chunks)
         )
 
-        # 6r. Empty Retrieval Optimization
+        # 5. Empty Retrieval Early-Exit Optimization
         if not retrieved_chunks:
-            logger.warning("[Request: %s] Retrieval returned 0 matches. Skipping LLM call.", request_id)
+            logger.warning("[RETRIEVAL] request_id=%s 0 matches above threshold. Early exit with grounded fallback.", request_id)
             overall_time_ms = int(round((time.perf_counter() - overall_start) * 1000))
-            
+
             stats_payload = {
                 "request_id": request_id,
                 "session_id": session_id,
@@ -586,6 +386,7 @@ class ChatService:
                 request_id=request_id
             )
 
+            logger.info("[RESPONSE] request_id=%s answer_generated=fallback sources=0 total_time_ms=%d", request_id, overall_time_ms)
             return ChatResponse(
                 success=True,
                 document_id=safe_doc_id,
@@ -599,10 +400,11 @@ class ChatService:
                 generation_time_ms=0,
                 sources=[],
                 session_id=session_id,
-                context_mode=context_mode
+                context_mode=context_mode,
+                context_truncated=False,
             )
 
-        # 7r. Context Deduplication & Boundary Truncation Limits
+        # 6. Context Deduplication & Boundary Clamping
         cleaned_chunks = []
         seen_ids = set()
         context_char_count = 0
@@ -612,10 +414,10 @@ class ChatService:
                 continue
             if not chunk.text or not chunk.text.strip():
                 continue
-            
+
             if len(cleaned_chunks) >= settings.MAX_CONTEXT_CHUNKS:
                 break
-                
+
             chunk_len = len(chunk.text)
             if context_char_count + chunk_len > settings.MAX_CONTEXT_CHARACTERS:
                 break
@@ -625,7 +427,7 @@ class ChatService:
             context_char_count += chunk_len
 
         if not cleaned_chunks:
-            logger.warning("[Request: %s] No valid chunks remaining after deduplication. Skipping LLM.", request_id)
+            logger.warning("[CONTEXT] request_id=%s No valid chunks remaining after deduplication. Skipping LLM.", request_id)
             overall_time_ms = int(round((time.perf_counter() - overall_start) * 1000))
 
             self._enrich_debug_info(
@@ -655,10 +457,11 @@ class ChatService:
                 generation_time_ms=0,
                 sources=[],
                 session_id=session_id,
-                context_mode=context_mode
+                context_mode=context_mode,
+                context_truncated=False,
             )
 
-        # 8r & 9r. Compile grounded prompt context and preflight trim for Groq budget
+        # 7. Compile prompt context & Authoritative Preflight Trimming
         system_prompt = PromptBuilder.get_system_prompt()
         context_truncated = False
         try:
@@ -671,13 +474,8 @@ class ChatService:
         except HTTPException:
             raise
 
-        context_char_count = sum(len(chunk.text) for chunk in cleaned_chunks)
-
         if not cleaned_chunks:
-            logger.warning(
-                "[Request: %s] No context chunks remain after preflight trimming. Skipping LLM.",
-                request_id
-            )
+            logger.warning("[CONTEXT] request_id=%s No context chunks remain after preflight trimming. Skipping LLM.", request_id)
             return ChatResponse(
                 success=True,
                 document_id=safe_doc_id,
@@ -694,9 +492,18 @@ class ChatService:
                 context_mode=context_mode,
                 context_truncated=context_truncated,
             )
-        logger.info("[Request: %s] Modular prompt compiled (RAG).", request_id)
 
-        # 10r. Call LLM Provider with conversation history
+        context_char_count = sum(len(chunk.text) for chunk in cleaned_chunks)
+        context_page_numbers = sorted({chunk.start_page for chunk in cleaned_chunks} | {chunk.end_page for chunk in cleaned_chunks})
+        logger.info(
+            "[CONTEXT] request_id=%s final_chunks=%d final_chars=%d pages=%s",
+            request_id,
+            len(cleaned_chunks),
+            context_char_count,
+            context_page_numbers
+        )
+
+        # 8. Call LLM Provider with conversation history
         generation_start = time.perf_counter()
         try:
             raw_answer, groq_truncated = self.provider.generate(
@@ -709,7 +516,7 @@ class ChatService:
             if groq_truncated:
                 context_truncated = True
         except Exception as gen_err:
-            logger.exception("[Request: %s] LLM generation failed", request_id)
+            logger.exception("[LLM] request_id=%s LLM generation failed: %s", request_id, str(gen_err))
             if isinstance(gen_err, HTTPException):
                 raise
             raise HTTPException(
@@ -718,29 +525,29 @@ class ChatService:
             )
 
         generation_time_ms = int(round((time.perf_counter() - generation_start) * 1000))
-        logger.info("[Request: %s] LLM text generation completed in %d ms (RAG).", request_id, generation_time_ms)
+        logger.info("[LLM] request_id=%s text generation completed in %d ms.", request_id, generation_time_ms)
 
-        # 11r. Validate generated response text
+        # 9. Validate generated response text
         if not raw_answer or not raw_answer.strip():
-            logger.error("[Request: %s] Generated completion response is empty or whitespace.", request_id)
+            logger.error("[LLM] request_id=%s Generated completion response is empty or whitespace.", request_id)
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="The AI provider returned an empty completion response."
             )
-        
+
         answer = raw_answer.strip()
 
-        # Store conversation turn
+        # 10. Store conversation turn
         conversation_store.add_turn(safe_doc_id, session_id, request.question, answer)
 
-        # 12r. Map cited Source Chunks
+        # 11. Authoritative Citation Construction: Exclusively from surviving context chunks
         sources: List[SourceChunk] = []
         for chunk in cleaned_chunks:
             sources.append(
                 SourceChunk(
                     chunk_id=chunk.chunk_id,
                     chunk_index=chunk.chunk_index,
-                    last_chunk_index=getattr(chunk, "last_chunk_index", None) if hasattr(chunk, "last_chunk_index") else chunk.get("last_chunk_index", None),
+                    last_chunk_index=getattr(chunk, "last_chunk_index", None) if hasattr(chunk, "last_chunk_index") else (chunk.get("last_chunk_index", None) if isinstance(chunk, dict) else None),
                     score=round(chunk.score, 4),
                     start_page=chunk.start_page,
                     end_page=chunk.end_page,
@@ -748,12 +555,20 @@ class ChatService:
                 )
             )
 
+        source_pages = sorted({s.start_page for s in sources} | {s.end_page for s in sources})
+        logger.info(
+            "[SOURCES] request_id=%s source_count=%d source_pages=%s chunk_ids=%s",
+            request_id,
+            len(sources),
+            source_pages,
+            [s.chunk_id for s in sources]
+        )
+
         overall_time_ms = int(round((time.perf_counter() - overall_start) * 1000))
 
-        # 13r. Estimate token usages
+        # 12. Token estimation
         estimated_prompt_tokens = 0
         estimated_completion_tokens = 0
-        
         if settings.ENABLE_TOKEN_ESTIMATION:
             total_prompt_chars = len(system_prompt) + len(compiled_context) + len(request.question)
             history_chars = sum(len(m.get("content", "")) for m in (history or []))
@@ -806,7 +621,7 @@ class ChatService:
             request_id=request_id
         )
 
-        # 14r. Return Response payload
+        logger.info("[RESPONSE] request_id=%s answer_generated=true processing_time_ms=%d", request_id, overall_time_ms)
         return ChatResponse(
             success=True,
             document_id=safe_doc_id,
@@ -823,6 +638,9 @@ class ChatService:
             context_mode=context_mode,
             context_truncated=context_truncated,
         )
+
+
+    def _enrich_debug_info(
         self,
         doc_dir: Path,
         question: str,

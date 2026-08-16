@@ -15,13 +15,17 @@ export function useHealth() {
     refetchInterval: 10000, // Refresh health status check every 10 seconds
   });
 
-  const apiError = query.error ? handleApiError(query.error) : null;
+  const isError = query.isError;
+  const rawError = query.error;
 
   useEffect(() => {
-    if (apiError) {
-      toastError('System Diagnostics Offline', apiError.message);
+    if (isError && rawError) {
+      const parsed = handleApiError(rawError);
+      toastError('System Diagnostics Offline', parsed.message);
     }
-  }, [apiError, toastError]);
+  }, [isError, rawError, toastError]);
+
+  const apiError = query.error ? handleApiError(query.error) : null;
 
   return {
     health: query.data || null,

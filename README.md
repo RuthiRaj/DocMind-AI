@@ -179,6 +179,17 @@ Open `http://localhost:3000` in your browser.
 
 ---
 
+### 4. Running Tests
+
+Execute the automated pytest regression suite:
+```bash
+cd backend
+python -m pytest tests/ -v
+```
+
+---
+
+
 ## 🌐 API Endpoints Overview
 
 | Method | Endpoint | Description |

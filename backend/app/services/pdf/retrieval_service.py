@@ -549,17 +549,17 @@ class RetrievalService:
                         if last_res.last_chunk_index is not None
                         else last_res.chunk_index
                     )
-                    index_diff = abs(res.chunk_index - current_last_idx)
+                    is_consecutive = (res.chunk_index == current_last_idx + 1)
                     page_overlap = (
-                        abs(res.start_page - last_res.end_page) <= 1 or
-                        abs(res.end_page - last_res.start_page) <= 1
+                        abs(res.start_page - last_res.end_page) <= 1
+                        and (res.end_page - last_res.start_page) <= 2
                     )
                     
                     merged_count = getattr(last_res, "_merged_count", 1)
                     projected_len = len(last_res.text) + 2 + len(res.text)
                     
                     if (
-                        index_diff == 1 
+                        is_consecutive
                         and page_overlap 
                         and merged_count < settings.MAX_MERGED_CHUNKS 
                         and projected_len <= settings.MAX_MERGED_CHUNK_CHARS
@@ -583,6 +583,17 @@ class RetrievalService:
                         res_copy = res.model_copy()
                         setattr(res_copy, "_merged_count", 1)
                         merged_results.append(res_copy)
+
+        # Invariant check: verify all merged chunks strictly obey max char and page bounds
+        for r in merged_results:
+            if len(r.text) > settings.MAX_MERGED_CHUNK_CHARS and getattr(r, "_merged_count", 1) > 1:
+                logger.warning(
+                    "Neighbor merge exceeded character limit (%d > %d) for chunk %s. Clamping text.",
+                    len(r.text), settings.MAX_MERGED_CHUNK_CHARS, r.chunk_id
+                )
+                r.text = r.text[:settings.MAX_MERGED_CHUNK_CHARS]
+                r.character_count = len(r.text)
+
 
         # Re-sort back by similarity score descending for ranking, and reassign rank counters
         merged_results.sort(key=lambda x: x.score, reverse=True)

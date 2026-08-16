@@ -54,5 +54,8 @@ frontend/.next/
 # Test artifacts
 .pytest_cache/
 backend/.pytest_cache/
+test_artifacts/
+backend/test_artifacts/
 .coverage
 htmlcov/
+

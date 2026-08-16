@@ -243,17 +243,24 @@ class GroqProvider(LLMProvider):
         )
 
         request_tokens = estimated_prompt_tokens + self._max_tokens
-        allowed, retry_after = groq_token_window.reserve(
+        reserve_res = groq_token_window.reserve(
             tokens=request_tokens,
             limit=settings.GROQ_TPM_LIMIT,
             window=60
         )
+        if isinstance(reserve_res, tuple) and len(reserve_res) == 3:
+            allowed, retry_after, res_id = reserve_res
+        else:
+            allowed, retry_after = reserve_res[0], reserve_res[1]
+            res_id = ""
+
         if not allowed:
             logger.warning(
-                "Groq token window rejected request: requested=%d retry_after=%ds",
+                "[RATE_LIMIT] Groq token window rejected request: requested=%d retry_after=%ds",
                 request_tokens,
                 retry_after,
             )
+
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"The AI service token limit is temporarily exhausted. Please try again in {retry_after} seconds."
@@ -278,33 +285,54 @@ class GroqProvider(LLMProvider):
             if not answer:
                 raise ValueError("Groq returned empty text content in completion message.")
 
+            # Settle token window with actual usage if provided by Groq
+            usage_obj = getattr(chat_completion, "usage", None)
+            actual_total_tokens = getattr(usage_obj, "total_tokens", None) if usage_obj else None
+            if isinstance(actual_total_tokens, (int, float)) and actual_total_tokens > 0:
+                groq_token_window.settle(res_id, actual_tokens=int(actual_total_tokens))
+                logger.info(
+                    "[LLM] Groq usage settled: prompt=%s completion=%s total=%d (reserved=%d)",
+                    str(getattr(usage_obj, "prompt_tokens", 0)),
+                    str(getattr(usage_obj, "completion_tokens", 0)),
+                    int(actual_total_tokens),
+                    request_tokens
+                )
+            else:
+                groq_token_window.settle(res_id, actual_tokens=estimated_prompt_tokens + len(answer) // 4)
+
+
             return answer, preflight_truncated
 
         except APITimeoutError as err:
+            groq_token_window.settle(res_id, actual_tokens=0)
             logger.error("Groq API request timed out: %s", str(err))
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="The AI provider connection timed out. Please try your request again later."
             )
         except AuthenticationError as err:
+            groq_token_window.settle(res_id, actual_tokens=0)
             logger.error("Groq authentication failure: %s", str(err))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Invalid API credentials configuration. Authentication failed."
             )
         except RateLimitError as err:
-            logger.warning("Groq rate limit exceeded: %s", str(err))
+            groq_token_window.settle(res_id, actual_tokens=0)
+            logger.warning("[RATE_LIMIT] Groq provider-side rate limit exceeded: %s", str(err))
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="The AI service rate limit was exceeded. Please try again shortly."
             )
         except APIConnectionError as err:
+            groq_token_window.settle(res_id, actual_tokens=0)
             logger.error("Failed to connect to Groq server API: %s", str(err))
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="Connection to the external AI provider failed."
             )
         except APIStatusError as err:
+            groq_token_window.settle(res_id, actual_tokens=0)
             response = getattr(err, "response", None)
             response_body = getattr(err, "body", None)
             if response_body is None and response is not None:
@@ -326,11 +354,13 @@ class GroqProvider(LLMProvider):
                 detail=f"External AI service returned an error status: {err.status_code}."
             )
         except Exception as exc:
+            groq_token_window.settle(res_id, actual_tokens=0)
             logger.exception("Unexpected error during Groq completion call: %s", str(exc))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"An unexpected completion failure occurred: {str(exc)}"
             )
+
 
     def model_name(self) -> str:
         return self._model

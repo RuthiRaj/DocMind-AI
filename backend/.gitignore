@@ -24,3 +24,7 @@ uploads/*
 
 vector_store/*
 !vector_store/.gitkeep
+
+# Test Artifacts & Verification Runs
+test_artifacts/
+

@@ -69,31 +69,66 @@ class RateLimiter:
 rate_limiter = RateLimiter()
 
 
+import uuid
+
 class GroqTokenWindow:
-    """Thread-safe in-process rolling token reservation window for Groq calls."""
+    """Thread-safe in-process rolling token reservation window for Groq calls with post-call settlement."""
 
     def __init__(self):
-        self.reservations = deque()
+        self.reservations: Dict[str, Tuple[float, int]] = {}
         self.lock = threading.Lock()
 
-    def reserve(self, tokens: int, limit: int, window: int) -> Tuple[bool, int]:
+    def reserve(self, tokens: int, limit: int, window: int = 60) -> Tuple[bool, int, str]:
+        """
+        Attempt to reserve estimated tokens within a sliding window.
+        Returns:
+            Tuple[bool, int, str]: (is_allowed, retry_after_seconds, reservation_id)
+        """
         now = time.time()
         cutoff = now - window
 
         with self.lock:
-            while self.reservations and self.reservations[0][0] <= cutoff:
-                self.reservations.popleft()
+            # Evict expired reservations
+            expired_keys = [k for k, (ts, _) in self.reservations.items() if ts <= cutoff]
+            for k in expired_keys:
+                del self.reservations[k]
 
-            used_tokens = sum(item[1] for item in self.reservations)
+            used_tokens = sum(t[1] for t in self.reservations.values())
             if used_tokens + tokens > limit:
-                retry_after = max(1, int(self.reservations[0][0] + window - now)) if self.reservations else window
-                return False, retry_after
+                oldest = min((t[0] for t in self.reservations.values()), default=now)
+                retry_after = max(1, int(oldest + window - now))
+                return False, retry_after, ""
 
-            self.reservations.append((now, tokens))
-            return True, 0
+            res_id = str(uuid.uuid4())
+            self.reservations[res_id] = (now, tokens)
+            return True, 0, res_id
+
+    def settle(self, reservation_id: str, actual_tokens: int | None = None) -> None:
+        """
+        Updates an active reservation with actual token usage, or releases it on failure.
+        """
+        if not reservation_id:
+            return
+
+        with self.lock:
+            if reservation_id in self.reservations:
+                if actual_tokens is None or actual_tokens <= 0:
+                    del self.reservations[reservation_id]
+                else:
+                    ts, _ = self.reservations[reservation_id]
+                    self.reservations[reservation_id] = (ts, int(actual_tokens))
+
+    def current_usage(self, window: int = 60) -> int:
+        """Returns the current settled + reserved token sum in the sliding window."""
+        now = time.time()
+        cutoff = now - window
+        with self.lock:
+            return sum(tok for ts, tok in self.reservations.values() if ts > cutoff)
+
 
 
 groq_token_window = GroqTokenWindow()
+
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):

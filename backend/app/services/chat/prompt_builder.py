@@ -27,12 +27,20 @@ class PromptBuilder:
         Concatenates chunk texts into a single context string with index labels,
         preserving original reading order, removing repeated sentences, and joining cleanly.
         """
+        def _get_val(obj, key, default=None):
+            if hasattr(obj, key):
+                v = getattr(obj, key)
+                return v if v is not None else default
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return default
+
         # Ensure chunks are sorted by start_page and chunk_index to preserve original reading flow
         sorted_chunks = sorted(
             chunks, 
             key=lambda x: (
-                getattr(x, "start_page", 1) if hasattr(x, "start_page") else x.get("start_page", 1),
-                getattr(x, "chunk_index", 1) if hasattr(x, "chunk_index") else x.get("chunk_index", 1)
+                _get_val(x, "start_page", 1),
+                _get_val(x, "chunk_index", 1)
             )
         )
         
@@ -41,7 +49,7 @@ class PromptBuilder:
         compiled = []
         
         for i, chunk in enumerate(sorted_chunks, start=1):
-            text = chunk.text if hasattr(chunk, "text") else chunk.get("text", "")
+            text = _get_val(chunk, "text", "")
             
             # Segment text into sentences using simple regex splits on punctuations with whitespace boundaries
             sentences = re.split(r'(?<=[.!?])\s+', text)
@@ -62,10 +70,10 @@ class PromptBuilder:
                 clean_chunk_text = " ".join(deduped_sentences)
                 
                 # Format page numbers and chunk index ranges
-                start_page = getattr(chunk, "start_page", 1) if hasattr(chunk, "start_page") else chunk.get("start_page", 1)
-                end_page = getattr(chunk, "end_page", 1) if hasattr(chunk, "end_page") else chunk.get("end_page", 1)
-                chunk_index = getattr(chunk, "chunk_index", 1) if hasattr(chunk, "chunk_index") else chunk.get("chunk_index", 1)
-                last_chunk_index = getattr(chunk, "last_chunk_index", None) if hasattr(chunk, "last_chunk_index") else chunk.get("last_chunk_index", None)
+                start_page = _get_val(chunk, "start_page", 1)
+                end_page = _get_val(chunk, "end_page", 1)
+                chunk_index = _get_val(chunk, "chunk_index", 1)
+                last_chunk_index = _get_val(chunk, "last_chunk_index", None)
                 
                 page_str = f"{start_page} to {end_page}" if start_page != end_page else f"{start_page}"
                 chunk_str = f"{chunk_index} to {last_chunk_index}" if last_chunk_index is not None else f"{chunk_index}"
@@ -80,6 +88,7 @@ class PromptBuilder:
                 compiled.append(segment_info)
                 
         return "\n\n".join(compiled)
+
 
     @staticmethod
     def get_full_context_system_prompt() -> str:

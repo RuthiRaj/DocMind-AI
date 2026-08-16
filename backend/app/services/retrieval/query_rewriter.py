@@ -66,7 +66,7 @@ def rewrite_query(original_query: str) -> List[str]:
             // settings.TOKEN_ESTIMATION_RATIO
             + 150
         )
-        allowed, retry_after = groq_token_window.reserve(
+        allowed, retry_after, res_id = groq_token_window.reserve(
             tokens=rewrite_tokens,
             limit=settings.GROQ_TPM_LIMIT,
             window=60
@@ -78,38 +78,50 @@ def rewrite_query(original_query: str) -> List[str]:
             )
             return queries
 
-        response = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": _REWRITE_SYSTEM_PROMPT},
-                {"role": "user", "content": original_query},
-            ],
-            model=settings.LLM_MODEL,
-            temperature=0.7,
-            max_tokens=150,
-            timeout=5,
-        )
+        try:
+            response = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": _REWRITE_SYSTEM_PROMPT},
+                    {"role": "user", "content": original_query},
+                ],
+                model=settings.LLM_MODEL,
+                temperature=0.7,
+                max_tokens=150,
+                timeout=5,
+            )
 
-        if not response.choices or not response.choices[0].message.content:
-            logger.warning("Query rewriter received empty LLM response. Using original query only.")
-            return queries
+            if not response.choices or not response.choices[0].message.content:
+                groq_token_window.settle(res_id, actual_tokens=0)
+                logger.warning("Query rewriter received empty LLM response. Using original query only.")
+                return queries
 
-        raw_output = response.choices[0].message.content.strip()
-        rewrites = [
-            line.strip().lstrip("0123456789.-) ")
-            for line in raw_output.splitlines()
-            if line.strip() and len(line.strip()) > 5
-        ]
+            usage_obj = getattr(response, "usage", None)
+            actual_total = getattr(usage_obj, "total_tokens", None) if usage_obj else None
+            if actual_total is not None and actual_total > 0:
+                groq_token_window.settle(res_id, actual_tokens=actual_total)
+            else:
+                groq_token_window.settle(res_id, actual_tokens=rewrite_tokens)
 
-        # Keep at most 2 rewrites, and skip any that are identical to the original
-        for rw in rewrites[:2]:
-            if rw.lower() != original_query.lower() and rw not in queries:
-                queries.append(rw)
+            raw_output = response.choices[0].message.content.strip()
+            rewrites = [
+                line.strip().lstrip("0123456789.-) ")
+                for line in raw_output.splitlines()
+                if line.strip() and len(line.strip()) > 5
+            ]
 
-        logger.info(
-            "Query rewriter produced %d total queries: %s",
-            len(queries),
-            [q[:80] for q in queries],
-        )
+            # Keep at most 2 rewrites, and skip any that are identical to the original
+            for rw in rewrites[:2]:
+                if rw.lower() != original_query.lower() and rw not in queries:
+                    queries.append(rw)
+
+            logger.info(
+                "Query rewriter produced %d total queries: %s",
+                len(queries),
+                [q[:80] for q in queries],
+            )
+        except Exception:
+            groq_token_window.settle(res_id, actual_tokens=0)
+            raise
 
     except Exception as exc:
         logger.warning(
@@ -117,3 +129,4 @@ def rewrite_query(original_query: str) -> List[str]:
         )
 
     return queries
+

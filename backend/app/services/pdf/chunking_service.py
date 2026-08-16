@@ -64,38 +64,62 @@ class ChunkingService:
         pages_meta: List[Dict[str, int]]
     ) -> Tuple[int, int]:
         """
-        Determines start_page and end_page for a given character range based on pages.json.
+        Determines start_page and end_page for a given character range based on pages.json
+        using exact character interval overlap.
 
         Args:
-            start_char (int): Starting character offset.
-            end_char (int): Ending character offset.
+            start_char (int): Starting character offset of the chunk.
+            end_char (int): Ending character offset of the chunk.
             pages_meta (List[Dict]): List of page metadata entries with start_character and end_character.
 
         Returns:
-            Tuple[int, int]: (start_page, end_page)
+            Tuple[int, int]: (start_page, end_page) representing the actual pages overlapping this chunk.
         """
         if not pages_meta:
             return (1, 1)
 
-        start_page = pages_meta[0]["page"]
-        end_page = pages_meta[-1]["page"]
-        found_start = False
+        # Handle inverted offsets defensively
+        if end_char < start_char:
+            start_char, end_char = end_char, start_char
+
+        overlapping_pages: List[int] = []
 
         for meta in pages_meta:
-            page_num = meta["page"]
-            p_start = meta["start_character"]
-            p_end = meta["end_character"]
+            page_num = meta.get("page", 1)
+            p_start = meta.get("start_character", 0)
+            p_end = meta.get("end_character", 0)
 
-            if not found_start and p_start <= start_char <= p_end:
-                start_page = page_num
-                found_start = True
-            if p_start <= end_char <= p_end:
-                end_page = page_num
-                break
-            if end_char >= p_start:
-                end_page = page_num
+            # Positive overlap between intervals
+            if start_char < end_char:
+                if max(start_char, p_start) < min(end_char, p_end) and p_end > p_start:
+                    overlapping_pages.append(page_num)
+            else:
+                if p_start <= start_char <= p_end:
+                    overlapping_pages.append(page_num)
 
-        return (start_page, max(start_page, end_page))
+        if overlapping_pages:
+            return (min(overlapping_pages), max(overlapping_pages))
+
+
+        # Defensive fallback: If chunk falls in whitespace/gap between pages, find the closest page
+        closest_page = pages_meta[0].get("page", 1)
+        min_distance = float("inf")
+
+        for meta in pages_meta:
+            page_num = meta.get("page", 1)
+            p_start = meta.get("start_character", 0)
+            p_end = meta.get("end_character", 0)
+
+            if p_start <= start_char <= p_end:
+                return (page_num, page_num)
+
+            dist = min(abs(start_char - p_start), abs(start_char - p_end))
+            if dist < min_distance:
+                min_distance = dist
+                closest_page = page_num
+
+        return (closest_page, closest_page)
+
 
     def _count_sentences(self, text: str) -> int:
         """

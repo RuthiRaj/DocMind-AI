@@ -92,6 +92,7 @@ class Settings(BaseSettings):
 
     # Hybrid Context Strategy Settings
     MODEL_CONTEXT_WINDOW: int = 131072  # llama-3.1-8b-instant context window in tokens
+    ENABLE_FULL_CONTEXT_ROUTING: bool = False  # Default to RAG retrieval mode; FULL_CONTEXT must be explicitly enabled
     FULL_CONTEXT_MAX_CHARS: int = 10000  # Max document chars for full-context mode under Groq TPM limits
     CONVERSATION_MAX_TURNS: int = 10  # Max conversation turns to keep in memory per session
     CONVERSATION_MAX_TOKENS: int = 4000  # Token budget reserved for conversation history
