@@ -73,26 +73,45 @@ Built with a fast **FastAPI** Python backend, zero-dependency **BM25 + FAISS** h
 
 ```text
 DocMind AI/
-├── backend/                            # FastAPI Python Backend Application
+├── .gitignore
+├── LICENSE
+├── README.md
+├── backend/
+│   ├── .env.example
+│   ├── .gitignore
+│   ├── pytest.ini
+│   ├── requirements.txt
 │   ├── app/
-│   │   ├── main.py                     # Application entrypoint & CORS middleware
-│   │   ├── api/                        # REST API routes & router registry
-│   │   ├── core/                       # Settings, health checks, prompts, & rate limiter
-│   │   ├── schemas/                    # Pydantic request/response data models
-│   │   ├── services/                   # Ingestion, chunking, embedding, RAG, & management
-│   │   └── utils/                      # Formatting helpers & utilities
-│   ├── scripts/                        # Operational & Admin Scripts
-│   │   └── migrate_v2_documents.py     # Batch admin migration script for V2 upgrades
-│   ├── .env.example                    # Environment variable configuration template
-│   └── requirements.txt                # Python backend dependencies
-├── frontend/                           # Next.js 16 / React 19 Frontend Application
-│   ├── app/                            # App Router pages & layouts
-│   ├── components/                     # Modern UI components (dropzone, chat, citations)
-│   ├── services/                       # API integration services
-│   ├── package.json                    # Frontend dependencies
-│   └── .env.local.example              # Frontend environment template
-├── LICENSE                             # MIT License
-└── README.md                           # Documentation & quickstart guide
+│   │   ├── main.py
+│   │   ├── api/
+│   │   ├── core/
+│   │   ├── schemas/
+│   │   ├── services/
+│   │   └── utils/
+│   ├── scripts/
+│   │   ├── migrate_v2_documents.py
+│   │   ├── run_adversarial_audit.py
+│   │   └── verify_live_api_execution.py
+│   ├── tests/
+│   │   ├── conftest.py
+│   │   ├── test_preflight_trimming.py
+│   │   └── test_rag_architecture_integration.py
+│   └── vector_store/
+│       └── .gitkeep
+└── frontend/
+    ├── .env.local.example
+    ├── .gitignore
+    ├── next.config.ts
+    ├── package.json
+    ├── tsconfig.json
+    ├── app/
+    ├── components/
+    ├── constants/
+    ├── hooks/
+    ├── lib/
+    ├── providers/
+    ├── services/
+    └── types/
 ```
 
 ---
@@ -189,20 +208,25 @@ python -m pytest tests/ -v
 
 ---
 
-
 ## 🌐 API Endpoints Overview
 
-| Method | Endpoint | Description |
+| Method | Endpoint | Purpose |
 |---|---|---|
-| `GET` | `/api/v1/health` | Comprehensive system health & diagnostics check |
-| `POST` | `/api/v1/upload` | Upload PDF file with magic bytes validation |
-| `POST` | `/api/v1/process` | Extract cleaned page text & metadata |
-| `POST` | `/api/v1/chunk` | Smart text chunking with page bounds |
-| `POST` | `/api/v1/embed` | Generate dense vector embeddings |
-| `POST` | `/api/v1/index` | Build local FAISS vector search index |
-| `POST` | `/api/v1/retrieve` | Execute BM25 + Vector hybrid RRF retrieval |
-| `POST` | `/api/v1/chat` | Send question & receive grounded RAG answer with citations |
-| `GET` | `/api/v1/management/documents` | List all processed documents & pipeline status |
+| `GET` | `/health` | Backend health check |
+| `POST` | `/upload` | Upload a PDF document |
+| `POST` | `/process/{document_id}` | Extract/process document text |
+| `POST` | `/chunk/{document_id}` | Create document chunks |
+| `POST` | `/embed/{document_id}` | Generate embeddings |
+| `POST` | `/index/{document_id}` | Create/update FAISS index |
+| `POST` | `/retrieve/{document_id}` | Retrieve relevant chunks |
+| `GET` | `/retrieve/{document_id}/debug` | Retrieval/debug telemetry |
+| `POST` | `/chat/{document_id}` | Grounded RAG chat |
+| `GET` | `/documents` | List documents |
+| `GET` | `/documents/statistics` | Document statistics |
+| `GET` | `/documents/{document_id}` | Get document details |
+| `GET` | `/documents/{document_id}/status` | Get document pipeline status |
+| `DELETE` | `/documents/{document_id}` | Delete a document |
+| `POST` | `/maintenance/cleanup` | Clean disposable runtime data |
 
 ---
 
