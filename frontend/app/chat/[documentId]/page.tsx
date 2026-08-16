@@ -51,7 +51,8 @@ export default function ChatPage({ params }: ChatPageProps) {
   // Active citation details modal state
   const [activeCitation, setActiveCitation] = useState<{
     text: string;
-    page: number;
+    startPage: number;
+    endPage: number;
     score: number;
     chunkId: string;
   } | null>(null);
@@ -261,24 +262,28 @@ export default function ChatPage({ params }: ChatPageProps) {
                                   <Bookmark className="w-3 h-3 text-primary" />
                                   Sources:
                                 </span>
-                                {m.citations.map((c) => (
-                                  <button
-                                    key={c.chunk_id}
-                                    onClick={() =>
-                                      setActiveCitation({
-                                        text: c.text,
-                                        page: c.page_number,
-                                        score: c.similarity_score,
-                                        chunkId: c.chunk_id,
-                                      })
-                                    }
-                                    type="button"
-                                    className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border border-primary/25 bg-primary/5 hover:bg-primary/10 text-primary text-xs font-semibold cursor-pointer transition-colors"
-                                  >
-                                    <FileText className="w-3 h-3" />
-                                    <span>Page {c.page_number}</span>
-                                  </button>
-                                ))}
+                                {m.citations.map((c) => {
+                                  const pageLabel = c.start_page === c.end_page ? `Page ${c.start_page}` : `Page ${c.start_page}-${c.end_page}`;
+                                  return (
+                                    <button
+                                      key={c.chunk_id}
+                                      onClick={() =>
+                                        setActiveCitation({
+                                          text: c.text,
+                                          startPage: c.start_page,
+                                          endPage: c.end_page,
+                                          score: c.similarity_score,
+                                          chunkId: c.chunk_id,
+                                        })
+                                      }
+                                      type="button"
+                                      className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border border-primary/25 bg-primary/5 hover:bg-primary/10 text-primary text-xs font-semibold cursor-pointer transition-colors"
+                                    >
+                                      <FileText className="w-3 h-3" />
+                                      <span>{pageLabel}</span>
+                                    </button>
+                                  );
+                                })}
                               </div>
                             )}
                           </div>
@@ -328,7 +333,7 @@ export default function ChatPage({ params }: ChatPageProps) {
         <Dialog
           isOpen={activeCitation !== null}
           onClose={() => setActiveCitation(null)}
-          title={`Citation Source - Page ${activeCitation?.page}`}
+          title={`Citation Source - ${activeCitation ? (activeCitation.startPage === activeCitation.endPage ? `Page ${activeCitation.startPage}` : `Pages ${activeCitation.startPage}–${activeCitation.endPage}`) : ''}`}
         >
           {activeCitation && (
             <div className="space-y-4">

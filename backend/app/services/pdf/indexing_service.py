@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
@@ -173,7 +174,8 @@ class IndexingService:
                 except Exception as e:
                     logger.warning("Failed to read index_metadata.json for document_id '%s': %s. Re-indexing...", safe_doc_id, str(e))
 
-            logger.info("Indexing generation pipeline started for document_id: '%s'", safe_doc_id)
+            request_id = str(uuid.uuid4())
+            logger.info("[STAGE: INDEX] request_id=%s document_id='%s' status=started", request_id, safe_doc_id)
             self._update_status(status_path, "running")
             start_time = time.perf_counter()
 
@@ -299,9 +301,11 @@ class IndexingService:
             )
 
             logger.info(
-                "Indexing completed successfully in %d ms for document_id '%s'.",
+                "[STAGE: INDEX] request_id=%s document_id='%s' status=completed elapsed_ms=%d indexed_vectors=%d",
+                request_id,
+                safe_doc_id,
                 processing_time_ms,
-                safe_doc_id
+                self.provider.vector_count(index)
             )
 
             return IndexingResponse(

@@ -2,6 +2,8 @@ export interface ChatCitation {
   chunk_id: string;
   document_id: string;
   page_number: number;
+  start_page: number;
+  end_page: number;
   text: string;
   similarity_score: number;
   chunk_index: number;

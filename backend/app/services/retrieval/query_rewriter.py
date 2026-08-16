@@ -56,6 +56,16 @@ def rewrite_query(original_query: str) -> List[str]:
         return queries
 
     try:
+        # Check if Groq token window has sufficient headroom for query expansion
+        current_tokens = groq_token_window.current_usage(window=60)
+        if current_tokens > (settings.GROQ_TPM_LIMIT - 2500):
+            logger.info(
+                "Query rewriter skipped to prioritize Groq TPM quota for chat completions (usage=%d/%d).",
+                current_tokens,
+                settings.GROQ_TPM_LIMIT
+            )
+            return queries
+
         from app.services.chat.groq_provider import GroqProvider
 
         provider = GroqProvider()
@@ -79,16 +89,18 @@ def rewrite_query(original_query: str) -> List[str]:
             return queries
 
         try:
-            response = client.chat.completions.create(
+            raw_response = client.chat.completions.with_raw_response.create(
                 messages=[
                     {"role": "system", "content": _REWRITE_SYSTEM_PROMPT},
                     {"role": "user", "content": original_query},
                 ],
                 model=settings.LLM_MODEL,
-                temperature=0.7,
-                max_tokens=150,
-                timeout=5,
+                temperature=settings.QUERY_REWRITE_TEMPERATURE,
+                max_tokens=settings.QUERY_REWRITE_MAX_TOKENS,
+                timeout=settings.QUERY_REWRITE_TIMEOUT_SECONDS,
             )
+            response = raw_response.parse()
+            headers = dict(raw_response.headers)
 
             if not response.choices or not response.choices[0].message.content:
                 groq_token_window.settle(res_id, actual_tokens=0)
@@ -96,11 +108,48 @@ def rewrite_query(original_query: str) -> List[str]:
                 return queries
 
             usage_obj = getattr(response, "usage", None)
+            prompt_tokens = int(getattr(usage_obj, "prompt_tokens", 0)) if usage_obj else (rewrite_tokens - 150)
+            completion_tokens = int(getattr(usage_obj, "completion_tokens", 0)) if usage_obj else 30
             actual_total = getattr(usage_obj, "total_tokens", None) if usage_obj else None
+
             if actual_total is not None and actual_total > 0:
-                groq_token_window.settle(res_id, actual_tokens=actual_total)
+                total_tokens = int(actual_total)
+                groq_token_window.settle(res_id, actual_tokens=total_tokens)
             else:
-                groq_token_window.settle(res_id, actual_tokens=rewrite_tokens)
+                total_tokens = prompt_tokens + completion_tokens
+                groq_token_window.settle(res_id, actual_tokens=total_tokens)
+
+            rl_headers = {
+                "remaining_tokens": headers.get("x-ratelimit-remaining-tokens"),
+                "limit_tokens": headers.get("x-ratelimit-limit-tokens"),
+                "reset_tokens": headers.get("x-ratelimit-reset-tokens"),
+                "remaining_requests": headers.get("x-ratelimit-remaining-requests"),
+                "limit_requests": headers.get("x-ratelimit-limit-requests"),
+                "reset_requests": headers.get("x-ratelimit-reset-requests"),
+            }
+
+            from app.core.telemetry import groq_telemetry
+            groq_telemetry.record_call(
+                call_type="query_rewrite",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                ratelimit_headers=rl_headers,
+                query=original_query,
+                extra={"reason": reason}
+            )
+
+            logger.info(
+                "[GROQ_TELEMETRY] call=query_rewrite prompt_tokens=%d completion_tokens=%d total_tokens=%d "
+                "remaining_tokens=%s limit_tokens=%s reset_tokens=%s remaining_requests=%s",
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                rl_headers.get("remaining_tokens"),
+                rl_headers.get("limit_tokens"),
+                rl_headers.get("reset_tokens"),
+                rl_headers.get("remaining_requests"),
+            )
 
             raw_output = response.choices[0].message.content.strip()
             rewrites = [

@@ -44,48 +44,31 @@ class PromptBuilder:
             )
         )
         
-        import re
-        seen_sentences = set()
         compiled = []
-        
         for i, chunk in enumerate(sorted_chunks, start=1):
             text = _get_val(chunk, "text", "")
+            if not text or not text.strip():
+                continue
             
-            # Segment text into sentences using simple regex splits on punctuations with whitespace boundaries
-            sentences = re.split(r'(?<=[.!?])\s+', text)
+            clean_chunk_text = text.strip()
             
-            deduped_sentences = []
-            for sentence in sentences:
-                s_strip = sentence.strip()
-                if not s_strip:
-                    continue
-                # Normalize sentence for duplicate tracking
-                norm_s = " ".join(s_strip.lower().split())
-                if norm_s in seen_sentences:
-                    continue
-                seen_sentences.add(norm_s)
-                deduped_sentences.append(s_strip)
-                
-            if deduped_sentences:
-                clean_chunk_text = " ".join(deduped_sentences)
-                
-                # Format page numbers and chunk index ranges
-                start_page = _get_val(chunk, "start_page", 1)
-                end_page = _get_val(chunk, "end_page", 1)
-                chunk_index = _get_val(chunk, "chunk_index", 1)
-                last_chunk_index = _get_val(chunk, "last_chunk_index", None)
-                
-                page_str = f"{start_page} to {end_page}" if start_page != end_page else f"{start_page}"
-                chunk_str = f"{chunk_index} to {last_chunk_index}" if last_chunk_index is not None else f"{chunk_index}"
-                
-                segment_info = (
-                    f"[Document Segment {i}]\n"
-                    f"Page: {page_str}\n"
-                    f"Chunk: {chunk_str}\n"
-                    f"Content:\n"
-                    f"{clean_chunk_text}"
-                )
-                compiled.append(segment_info)
+            # Format page numbers and chunk index ranges
+            start_page = _get_val(chunk, "start_page", 1)
+            end_page = _get_val(chunk, "end_page", 1)
+            chunk_index = _get_val(chunk, "chunk_index", 1)
+            last_chunk_index = _get_val(chunk, "last_chunk_index", None)
+            
+            page_str = f"{start_page} to {end_page}" if start_page != end_page else f"{start_page}"
+            chunk_str = f"{chunk_index} to {last_chunk_index}" if last_chunk_index is not None else f"{chunk_index}"
+            
+            segment_info = (
+                f"[Document Segment {i}]\n"
+                f"Page: {page_str}\n"
+                f"Chunk: {chunk_str}\n"
+                f"Content:\n"
+                f"{clean_chunk_text}"
+            )
+            compiled.append(segment_info)
                 
         return "\n\n".join(compiled)
 

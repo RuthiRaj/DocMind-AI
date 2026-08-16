@@ -51,11 +51,14 @@ frontend/node_modules/
 .next/
 frontend/.next/
 
-# Test artifacts
+# Test artifacts & generated binaries
 .pytest_cache/
 backend/.pytest_cache/
 test_artifacts/
 backend/test_artifacts/
+*.pdf
+backend/*.pdf
+**/*.pdf
 .coverage
 htmlcov/
 

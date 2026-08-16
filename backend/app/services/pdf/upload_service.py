@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Constants
 ALLOWED_EXTENSION = ".pdf"
 ALLOWED_MIME_TYPE = "application/pdf"
-CHUNK_SIZE = 1024 * 1024  # 1 MB chunk for streaming read/write
+CHUNK_SIZE = settings.UPLOAD_STREAM_CHUNK_BYTES  # Configurable buffer for streaming read/write
 
 
 class PDFUploadService:
@@ -167,12 +167,14 @@ class PDFUploadService:
         # Initialize status.json for document lifecycle management
         status_data = {
             "document_id": document_id,
+            "original_filename": original_filename,
             "upload_status": "completed",
             "processing_status": "pending",
             "chunking_status": "pending",
             "embedding_status": "pending",
             "indexing_status": "pending",
             "chat_ready": False,
+            "uploaded_at": uploaded_at,
             "created_at": uploaded_at,
             "updated_at": uploaded_at
         }

@@ -126,12 +126,14 @@ class ManagementService:
                 continue
 
             # Parse metadata.json
+            meta_filename = None
             if metadata_path.exists():
                 try:
                     with open(metadata_path, "r", encoding="utf-8") as mf:
                         meta_data = json.load(mf)
-                    upload_time = meta_data.get("upload_time")
+                    upload_time = meta_data.get("upload_time") or meta_data.get("processed_at")
                     total_pages = meta_data.get("total_pages")
+                    meta_filename = meta_data.get("filename")
                 except Exception as err:
                     logger.warning("Failed to parse metadata.json for document_id '%s': %s", doc_id, str(err))
 
@@ -161,10 +163,24 @@ class ManagementService:
                 creation_time = datetime.fromtimestamp(stat_info.st_mtime, timezone.utc)
                 upload_time = creation_time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+            # Resolve user-facing display filename (prefer original_filename, then metadata filename, fallback to doc_id)
+            orig_name = None
+            if status_path.exists():
+                try:
+                    with open(status_path, "r", encoding="utf-8") as sf:
+                        st_json = json.load(sf)
+                    orig_name = st_json.get("original_filename")
+                except Exception:
+                    pass
+
+            resolved_filename = orig_name or meta_filename or f"Document-{doc_id[:8]}.pdf"
+            if resolved_filename in ["(anonymous)", "original.pdf"]:
+                resolved_filename = orig_name or f"Document-{doc_id[:8]}.pdf"
+
             document_items.append(
                 DocumentListItem(
                     document_id=doc_id,
-                    filename=pdf_path.name,
+                    filename=resolved_filename,
                     upload_time=upload_time,
                     total_pages=total_pages,
                     total_chunks=total_chunks,
@@ -213,8 +229,8 @@ class ManagementService:
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     metadata = json.load(f)
-            except Exception:
-                pass
+            except Exception as err:
+                logger.warning("Failed to load metadata.json for doc %s: %s", safe_doc_id, str(err))
 
         # Load status.json
         status_path = doc_dir / "status.json"
@@ -222,8 +238,8 @@ class ManagementService:
             try:
                 with open(status_path, "r", encoding="utf-8") as f:
                     status_data = json.load(f)
-            except Exception:
-                pass
+            except Exception as err:
+                logger.warning("Failed to load status.json for doc %s: %s", safe_doc_id, str(err))
 
         # Load chunk_statistics.json
         chunk_stats_path = doc_dir / "chunk_statistics.json"
@@ -231,8 +247,8 @@ class ManagementService:
             try:
                 with open(chunk_stats_path, "r", encoding="utf-8") as f:
                     chunk_stats = json.load(f)
-            except Exception:
-                pass
+            except Exception as err:
+                logger.warning("Failed to load chunk_statistics.json for doc %s: %s", safe_doc_id, str(err))
 
         # Load embedding_metadata.json
         emb_meta_path = doc_dir / "embedding_metadata.json"
@@ -240,8 +256,8 @@ class ManagementService:
             try:
                 with open(emb_meta_path, "r", encoding="utf-8") as f:
                     emb_meta = json.load(f)
-            except Exception:
-                pass
+            except Exception as err:
+                logger.warning("Failed to load embedding_metadata.json for doc %s: %s", safe_doc_id, str(err))
 
         # Load index_metadata.json
         idx_meta_path = doc_dir / "index_metadata.json"
@@ -249,8 +265,8 @@ class ManagementService:
             try:
                 with open(idx_meta_path, "r", encoding="utf-8") as f:
                     idx_meta = json.load(f)
-            except Exception:
-                pass
+            except Exception as err:
+                logger.warning("Failed to load index_metadata.json for doc %s: %s", safe_doc_id, str(err))
 
         return DocumentDetailResponse(
             success=True,

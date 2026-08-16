@@ -119,3 +119,20 @@ async def delete_document(document_id: str) -> DeleteResponse:
         )
     res = management_service.delete_document(document_id)
     return DeleteResponse(**res)
+
+
+@router.get(
+    "/telemetry/recent",
+    status_code=status.HTTP_200_OK,
+    summary="Get Recent Groq Telemetry Metrics",
+    description="Returns recent LLM token metrics, query rewriting calls, and Groq rate-limit quota headers."
+)
+async def get_recent_telemetry(count: int = Query(default=10, ge=1, le=50)) -> dict:
+    from app.core.telemetry import groq_telemetry
+    entries = groq_telemetry.get_recent(count=count)
+    return {
+        "success": True,
+        "total_recorded": len(entries),
+        "telemetry": entries
+    }
+

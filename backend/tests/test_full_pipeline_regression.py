@@ -1,0 +1,262 @@
+"""
+Full Pipeline Comprehensive Regression Test Suite.
+
+Single authoritative regression test verifying end-to-end against live server:
+1. Upload & Pipeline Stage Execution (Process -> Chunk -> Embed -> Index)
+2. Neighbor-Merge Cap Compliance (Character & Chunk bounds)
+3. Cross-Page Citation Accuracy (start_page != end_page offset overlap)
+4. Strict Metadata Grounding (No hallucinated labels or field values)
+5. Multi-Match Completeness (All matching pages returned)
+6. Correct Refusal on Unanswerable / Off-Topic Questions (Grounded fallback)
+7. Groq 429 Rate-Limit Graceful Handling (Retry-After compliance)
+"""
+
+import sys
+import os
+import json
+import time
+import requests
+from pathlib import Path
+
+BASE_URL = "http://127.0.0.1:8000"
+ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "test_artifacts"
+
+
+def upload_and_process(pdf_path: Path) -> str:
+    print(f"\n[PIPELINE] Uploading & Processing: {pdf_path.name}")
+    with open(pdf_path, "rb") as f:
+        r = requests.post(f"{BASE_URL}/upload", files={"file": (pdf_path.name, f, "application/pdf")})
+    assert r.status_code == 200, f"Upload failed: {r.text}"
+    doc_id = r.json()["document_id"]
+    print(f"  --> Uploaded: doc_id={doc_id}")
+
+    for stage in ["process", "chunk", "embed", "index"]:
+        st_r = requests.post(f"{BASE_URL}/{stage}/{doc_id}")
+        assert st_r.status_code == 200, f"Stage {stage} failed: {st_r.text}"
+        print(f"  --> Stage {stage} completed (200 OK)")
+
+    status_res = requests.get(f"{BASE_URL}/documents/{doc_id}/status").json()
+    assert status_res.get("chat_ready") is True, f"Document not ready for chat: {status_res}"
+    print(f"  --> Pipeline verified: chat_ready=True")
+    return doc_id
+
+
+def query_chat_with_retry(doc_id: str, question: str, top_k: int = 10, max_retries: int = 4) -> dict:
+    for attempt in range(max_retries):
+        r = requests.post(f"{BASE_URL}/chat/{doc_id}", json={"question": question, "top_k": top_k}, timeout=90)
+        if r.status_code == 200:
+            return r.json()
+        elif r.status_code == 429:
+            retry_after = int(r.headers.get("Retry-After", 10))
+            sleep_time = max(retry_after + 2, 8)
+            print(f"      [429 Rate Limit] Retry-After={retry_after}s -> Sleeping {sleep_time}s (Attempt {attempt+1}/{max_retries})...")
+            time.sleep(sleep_time)
+        else:
+            raise RuntimeError(f"Chat request failed with status {r.status_code}: {r.text}")
+    raise RuntimeError("Exceeded max retries on chat endpoint.")
+
+
+def ensure_test_artifacts(artifacts_dir: Path) -> tuple[Path, Path]:
+    """
+    Ensures test PDFs exist on-the-fly without requiring static binaries in git.
+    """
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    acme_pdf = artifacts_dir / "acme_infrastructure_policy.pdf"
+    orion_pdf = artifacts_dir / "orion_40_page_spec.pdf"
+
+    import fitz
+
+    # 1. Generate ACME Policy PDF if missing
+    if not acme_pdf.exists():
+        print(f"  --> Generating synthetic ACME policy PDF on-the-fly: {acme_pdf.name}")
+        doc = fitz.open()
+        policies = [
+            ("POL-SEC-01", "Tier-1 Immediate", "Password and Credential Storage Policy: All secrets must use Argon2id hashing and HSM storage with zero cleartext logging."),
+            ("POL-SEC-02", "Tier-2 Standard", "Network Access Control: All ingress traffic must pass through application load balancers with TLS 1.3 enforced."),
+            ("POL-SEC-03", "Tier-3 Advisory", "Workstation Security: All employee workstations must run automated configuration management checks daily."),
+            ("POL-SEC-04", "Tier-1 Immediate", "Incident Response: Critical severity breach events require containment within 15 minutes of initial detection."),
+            ("POL-SEC-05", "Tier-2 Standard", "Data Classification: Sensitive datasets must be categorized into Public, Internal, Confidential, and Restricted."),
+            ("POL-SEC-06", "Tier-3 Advisory", "Third-Party Vendor Assessment: Annual compliance audits must be submitted by all cloud integration vendors."),
+            ("POL-SEC-07", "Tier-1 Immediate", "Database Encryption: Multi-region primary and replica databases must enforce AES-256 transparent data encryption."),
+            ("POL-SEC-08", "Tier-2 Standard", "Backup Retention: Daily snapshots must be preserved for 90 days and monthly archives for 7 years."),
+            ("POL-SEC-09", "Tier-3 Advisory", "Change Management: Production deployments require peer review signoff from two senior maintainers."),
+            ("POL-SEC-10", "Tier-2 Standard", "Vulnerability Scanning: Automated static code analysis must run on every pull request prior to merge.")
+        ]
+        for i, (pol_id, tier, body) in enumerate(policies, start=1):
+            page = doc.new_page(width=595, height=842)
+            page_text = f"ACME CORPORATION INFRASTRUCTURE SECURITY POLICY - PAGE {i}\n\nPolicy ID: {pol_id}\nEnforcement Tier: {tier}\nScope: Global Cloud Infrastructure\n\nPolicy Statement:\n{body}\n\nCompliance Verification:\nAudited quarterly by the internal security assessment council. Violations subject to escalation."
+            page.insert_text((50, 80), page_text, fontsize=11)
+        doc.save(acme_pdf)
+        doc.close()
+
+    # 2. Generate ORION 40-Page Spec PDF if missing
+    if not orion_pdf.exists():
+        print(f"  --> Generating synthetic ORION 40-page specification PDF on-the-fly: {orion_pdf.name}")
+        families = ["ORION-AUTH", "ORION-MONITOR", "ORION-CRYPTO", "ORION-ACCESS", "ORION-NETWORK", "ORION-RETENTION", "ORION-AUDIT", "ORION-BACKUP", "ORION-DEVOPS", "ORION-GOVERN"]
+        doc = fitz.open()
+        for page_num in range(1, 41):
+            fam = families[(page_num - 1) % 10]
+            seg_id = f"ORION-{page_num:03d}"
+            page = doc.new_page(width=595, height=842)
+            page_text = f"PROJECT ORION TECHNICAL ARCHITECTURE SPECIFICATION - PAGE {page_num}\n\nDocument Segment: {seg_id}\nControl Family: {fam}\nSecurity Classification: Restricted System\nEffective Date: 2026-01-01\n\nImplementation Details:\nThis specification page governs {fam} baseline protocols for segment {seg_id}. All nodes and microservices allocated under this segment must enforce full cryptographic telemetry verification and operational telemetry logging.\n\nRetention and Archival Specifications:\nFor segment {seg_id}, data preservation protocols require verified storage tiering with immutable multi-cluster replication across geographic datacenters.\n\nOperational Notes:\nSystem integrity checks execute automatically every 300 seconds to validate state compliance."
+            page.insert_text((50, 70), page_text, fontsize=10)
+        doc.save(orion_pdf)
+        doc.close()
+
+    return acme_pdf, orion_pdf
+
+
+def test_regression():
+    print("=" * 80)
+    print("STARTING FULL PIPELINE COMPREHENSIVE REGRESSION SUITE")
+    print("=" * 80)
+
+    acme_pdf, orion_pdf = ensure_test_artifacts(ARTIFACTS_DIR)
+
+    # 1. Pipeline execution
+    acme_id = upload_and_process(acme_pdf)
+    orion_id = upload_and_process(orion_pdf)
+
+    passes = []
+    failures = []
+
+    # -------------------------------------------------------------
+    # TEST 1: Neighbor-Merge Cap Compliance
+    # -------------------------------------------------------------
+    print("\n" + "-" * 70)
+    print("TEST 1: Neighbor-Merge Cap Compliance")
+    print("-" * 70)
+    try:
+        r = requests.post(f"{BASE_URL}/retrieve/{orion_id}", json={"query": "ORION continuous monitoring controls", "top_k": 10})
+        assert r.status_code == 200, f"Retrieval failed: {r.text}"
+        results = r.json()["results"]
+        for res in results:
+            text_len = len(res["text"])
+            assert text_len <= 1500, f"Neighbor merge char cap exceeded: {text_len} > 1500 for chunk {res['chunk_id']}"
+        passes.append("Test 1: Neighbor-merge character cap (<= 1500 chars) strictly enforced.")
+        print("  [PASS] All retrieved chunks strictly obey neighbor-merge limits.")
+    except Exception as e:
+        failures.append(f"Test 1 Failed: {str(e)}")
+        print(f"  [FAIL] {str(e)}")
+
+    # -------------------------------------------------------------
+    # TEST 2: Cross-Page Citation Accuracy
+    # -------------------------------------------------------------
+    print("\n" + "-" * 70)
+    print("TEST 2: Cross-Page Citation Accuracy (start_page != end_page)")
+    print("-" * 70)
+    try:
+        q_cross = "What are the retention procedures for ORION-026 and ORION-036?"
+        res_cross = query_chat_with_retry(orion_id, q_cross, top_k=10)
+        cross_sources = [s for s in res_cross.get("sources", []) if s["start_page"] != s["end_page"]]
+        assert len(cross_sources) > 0, "Expected at least one cross-page chunk in retrieval sources."
+        for s in cross_sources:
+            assert s["start_page"] < s["end_page"], f"Invalid page interval: {s['start_page']} >= {s['end_page']}"
+            print(f"  --> Found verified cross-page citation: chunk {s['chunk_id']} (Pages {s['start_page']}–{s['end_page']})")
+        passes.append(f"Test 2: Cross-page citation validated ({len(cross_sources)} multi-page chunks verified).")
+        print("  [PASS] Cross-page interval overlap verified.")
+    except Exception as e:
+        failures.append(f"Test 2 Failed: {str(e)}")
+        print(f"  [FAIL] {str(e)}")
+
+    time.sleep(5)
+
+    # -------------------------------------------------------------
+    # TEST 3: Strict Metadata Grounding (No Hallucinated Labels)
+    # -------------------------------------------------------------
+    print("\n" + "-" * 70)
+    print("TEST 3: Strict Metadata Grounding (Unstated Field Refusal)")
+    print("-" * 70)
+    try:
+        q_ground = "What is the Escalation Hotline and Lead Architect for ORION-006 on Page 6?"
+        res_ground = query_chat_with_retry(orion_id, q_ground, top_k=10)
+        ans_lower = res_ground["answer"].lower()
+        # Must refuse or state not specified, not hallucinate a fictitious phone number or architect name
+        assert any(term in ans_lower for term in ["not specify", "does not specify", "not explicitly mentioned", "not mentioned", "not specified", "couldn't find"]), (
+            f"Model hallucinated unstated field: {res_ground['answer']}"
+        )
+        passes.append("Test 3: Metadata grounding passed — model accurately stated unmentioned fields.")
+        print(f"  [PASS] Response correctly ground-checked:\n         {res_ground['answer'][:120]}...")
+    except Exception as e:
+        failures.append(f"Test 3 Failed: {str(e)}")
+        print(f"  [FAIL] {str(e)}")
+
+    time.sleep(5)
+
+    # -------------------------------------------------------------
+    # TEST 4: Multi-Match Completeness (ORION 40-page)
+    # -------------------------------------------------------------
+    print("\n" + "-" * 70)
+    print("TEST 4: Multi-Match Completeness (ORION-RETENTION across 4 pages)")
+    print("-" * 70)
+    try:
+        q_multi = "Which document segments and pages in this document belong to the ORION-RETENTION control family?"
+        res_multi = query_chat_with_retry(orion_id, q_multi, top_k=10)
+        ans = res_multi["answer"]
+        pages_found = set()
+        for p in [6, 16, 26, 36]:
+            if f"Page {p}" in ans or f"page {p}" in ans:
+                pages_found.add(p)
+        assert pages_found == {6, 16, 26, 36}, f"Missing matching pages in answer! Found: {pages_found}, Expected: {{6, 16, 26, 36}}"
+        passes.append("Test 4: Multi-match completeness passed — all 4 pages (6, 16, 26, 36) returned.")
+        print(f"  [PASS] All 4 matching pages (6, 16, 26, 36) present in output.")
+    except Exception as e:
+        failures.append(f"Test 4 Failed: {str(e)}")
+        print(f"  [FAIL] {str(e)}")
+
+    time.sleep(5)
+
+    # -------------------------------------------------------------
+    # TEST 5: Correct Refusal on Off-Topic / Unanswerable Query
+    # -------------------------------------------------------------
+    print("\n" + "-" * 70)
+    print("TEST 5: Grounded Refusal on Off-Topic Query")
+    print("-" * 70)
+    try:
+        q_refuse = "What is the secret recipe for baking homemade chocolate chip cookies?"
+        res_refuse = query_chat_with_retry(acme_id, q_refuse, top_k=5)
+        ans_refuse = res_refuse["answer"].lower()
+        sources_refuse = res_refuse.get("sources", [])
+        assert any(term in ans_refuse for term in ["couldn't find enough information", "not enough information", "cannot find"]), (
+            f"Model did not refuse off-topic question: {res_refuse['answer']}"
+        )
+        assert len(sources_refuse) == 0, f"Expected 0 sources on refusal, got: {len(sources_refuse)}"
+        passes.append("Test 5: Grounded refusal passed (fallback message with 0 citations).")
+        print("  [PASS] Model cleanly refused off-topic query with zero citations.")
+    except Exception as e:
+        failures.append(f"Test 5 Failed: {str(e)}")
+        print(f"  [FAIL] {str(e)}")
+
+    # -------------------------------------------------------------
+    # TEST 6: Live Telemetry & 429 Header Compliance
+    # -------------------------------------------------------------
+    print("\n" + "-" * 70)
+    print("TEST 6: Live Telemetry & Rate-Limit Tracking")
+    print("-" * 70)
+    try:
+        tel_r = requests.get(f"{BASE_URL}/telemetry")
+        assert tel_r.status_code == 200, f"Telemetry endpoint failed: {tel_r.text}"
+        tel_data = tel_r.json()
+        assert "recent_calls" in tel_data, "Missing recent_calls in telemetry response"
+        print(f"  --> Live Groq telemetry calls recorded: {len(tel_data['recent_calls'])}")
+        passes.append("Test 6: Telemetry and rate-limit tracking validated.")
+        print("  [PASS] Live telemetry verified.")
+    except Exception as e:
+        failures.append(f"Test 6 Failed: {str(e)}")
+        print(f"  [FAIL] {str(e)}")
+
+    # Summary
+    print("\n" + "=" * 80)
+    print(f"REGRESSION SUITE COMPLETED: {len(passes)} PASSED, {len(failures)} FAILED")
+    print("=" * 80)
+    for p in passes:
+        print(f"  [+] {p}")
+    for f in failures:
+        print(f"  [-] {f}")
+
+    if failures:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    test_regression()

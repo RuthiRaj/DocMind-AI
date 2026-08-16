@@ -12,6 +12,7 @@ import os
 import math
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -145,8 +146,8 @@ class ChunkingService:
         chunk_overlap: int = settings.CHUNK_OVERLAP
     ) -> List[ChunkItem]:
         """
-        Executes sliding-window smart chunking with stable IDs, character offsets,
-        and page mappings.
+        Executes sliding-window smart chunking with stable IDs, exact character offsets,
+        and page mappings derived directly from page character boundaries recorded at ingestion.
 
         Args:
             document_id (str): Unique document UUID.
@@ -162,182 +163,150 @@ class ChunkingService:
         chunks: List[ChunkItem] = []
         created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Hierarchical split into units (paragraphs / sentences)
-        paragraphs = [p.strip() for p in full_text.split("\n\n") if p.strip()]
-        units: List[str] = []
+        if not full_text or not full_text.strip():
+            return chunks
 
-        for para in paragraphs:
-            if len(para) <= chunk_size:
-                units.append(para)
+        # 1. Extract semantic units with exact (start_char, end_char) offsets in full_text
+        units: List[Tuple[str, int, int]] = []  # (unit_text, start_char, end_char)
+
+        # Split into paragraph matches preserving exact character offsets
+        para_pattern = re.compile(r"\S.*?(?=(?:\n\s*\n)|\Z)", re.DOTALL)
+        for p_match in para_pattern.finditer(full_text):
+            p_raw = p_match.group(0)
+            p_start = p_match.start()
+            p_end = p_match.end()
+            p_text = p_raw.strip()
+            if not p_text:
+                continue
+
+            # Adjust offsets to stripped content
+            lead_ws = len(p_raw) - len(p_raw.lstrip())
+            p_start += lead_ws
+            p_end = p_start + len(p_text)
+
+            if len(p_text) <= chunk_size:
+                units.append((p_text, p_start, p_end))
             else:
-                sentences = re.split(r"(?<=[.!?])\s+", para)
-                for sentence in sentences:
-                    sentence = sentence.strip()
-                    if not sentence:
+                # Split paragraph into sentences preserving exact character offsets
+                s_pattern = re.compile(r"[^.!?]+(?:[.!?]+|\Z)", re.DOTALL)
+                for s_match in s_pattern.finditer(p_text):
+                    s_raw = s_match.group(0)
+                    s_text = s_raw.strip()
+                    if not s_text:
                         continue
-                    if len(sentence) <= chunk_size:
-                        units.append(sentence)
+                    s_lead_ws = len(s_raw) - len(s_raw.lstrip())
+                    s_start = p_start + s_match.start() + s_lead_ws
+                    s_end = s_start + len(s_text)
+
+                    if len(s_text) <= chunk_size:
+                        units.append((s_text, s_start, s_end))
                     else:
-                        words = sentence.split(" ")
-                        current_word_unit = []
-                        current_len = 0
-                        for word in words:
-                            if current_len + len(word) + 1 <= chunk_size:
-                                current_word_unit.append(word)
-                                current_len += len(word) + 1
+                        # Split sentence into words preserving exact character offsets
+                        w_pattern = re.compile(r"\S+")
+                        cur_words = []
+                        cur_w_start = None
+                        cur_w_end = None
+                        for w_match in w_pattern.finditer(s_text):
+                            w_text = w_match.group(0)
+                            w_start = s_start + w_match.start()
+                            w_end = s_start + w_match.end()
+                            if cur_words and (w_end - cur_w_start) > chunk_size:
+                                units.append((" ".join(cur_words), cur_w_start, cur_w_end))
+                                cur_words = [w_text]
+                                cur_w_start = w_start
+                                cur_w_end = w_end
                             else:
-                                if current_word_unit:
-                                    units.append(" ".join(current_word_unit))
-                                current_word_unit = [word]
-                                current_len = len(word)
-                        if current_word_unit:
-                            units.append(" ".join(current_word_unit))
+                                if cur_w_start is None:
+                                    cur_w_start = w_start
+                                cur_words.append(w_text)
+                                cur_w_end = w_end
+                        if cur_words and cur_w_start is not None and cur_w_end is not None:
+                            units.append((" ".join(cur_words), cur_w_start, cur_w_end))
 
         logger.info(
-            "Hierarchical text split completed for document_id '%s': %d paragraphs, %d semantic units",
+            "Hierarchical text split completed for document_id '%s': %d semantic units with exact offsets",
             document_id,
-            len(paragraphs),
             len(units)
         )
 
-        current_units: List[str] = []
-        current_char_count = 0
+        if not units:
+            return chunks
+
+        # 2. Assemble chunks using exact offsets
         chunk_index_counter = 1
-        search_start_offset = 0
+        unit_idx = 0
+        total_units = len(units)
 
-        for unit in units:
-            unit_len = len(unit)
+        while unit_idx < total_units:
+            chunk_units: List[Tuple[str, int, int]] = []
+            cur_len = 0
+            cur_start_idx = unit_idx
 
-            if current_char_count + (2 if current_units else 0) + unit_len > chunk_size and current_units:
-                chunk_text = "\n\n".join(current_units).strip()
-                if chunk_text:
-                    # Find character bounds within full_text
-                    start_char = full_text.find(chunk_text[:30], search_start_offset)
-                    if start_char == -1:
-                        start_char = search_start_offset
-                    end_char = start_char + len(chunk_text)
+            while unit_idx < total_units:
+                u_text, u_start, u_end = units[unit_idx]
+                added_len = len(u_text) + (2 if chunk_units else 0)
+                if cur_len + added_len > chunk_size and chunk_units:
+                    break
+                chunk_units.append(units[unit_idx])
+                cur_len += added_len
+                unit_idx += 1
 
-                    start_page, end_page = self._determine_page_range(start_char, end_char, pages_meta)
-                    char_count = len(chunk_text)
-                    word_count = len(chunk_text.split())
-                    sentence_count = self._count_sentences(chunk_text)
-                    estimated_tokens = math.ceil(char_count / settings.TOKEN_ESTIMATION_RATIO)
-                    stable_id = f"{doc_prefix}_chunk_{chunk_index_counter:06d}"
+            if not chunk_units:
+                # Single unit larger than chunk_size, consume it
+                chunk_units.append(units[unit_idx])
+                unit_idx += 1
 
-                    chunks.append(
-                        ChunkItem(
-                            chunk_id=stable_id,
-                            chunk_index=chunk_index_counter,
-                            document_id=document_id,
-                            start_character=start_char,
-                            end_character=end_char,
-                            start_page=start_page,
-                            end_page=end_page,
-                            page_start=start_page,
-                            page_end=end_page,
-                            character_count=char_count,
-                            word_count=word_count,
-                            sentence_count=sentence_count,
-                            estimated_tokens=estimated_tokens,
-                            embedding_status="pending",
-                            embedding_model=None,
-                            vector_dimension=None,
-                            created_at=created_at,
-                            text=chunk_text
-                        )
-                    )
-                    chunk_index_counter += 1
-                    search_start_offset = max(0, end_char - chunk_overlap)
+            start_char = chunk_units[0][1]
+            end_char = chunk_units[-1][2]
+            chunk_text = full_text[start_char:end_char].strip()
+            if not chunk_text:
+                chunk_text = "\n\n".join(u[0] for u in chunk_units)
 
-                # Form overlap buffer for next chunk
-                overlap_text = ""
-                if chunk_overlap > 0 and len(chunk_text) > chunk_overlap:
-                    raw_overlap = chunk_text[-chunk_overlap:]
-                    space_idx = raw_overlap.find(" ")
-                    if space_idx != -1 and space_idx < len(raw_overlap) - 10:
-                        overlap_text = raw_overlap[space_idx + 1:].strip()
-                    else:
-                        overlap_text = raw_overlap.strip()
+            start_page, end_page = self._determine_page_range(start_char, end_char, pages_meta)
+            char_count = len(chunk_text)
+            word_count = len(chunk_text.split())
+            sentence_count = self._count_sentences(chunk_text)
+            estimated_tokens = math.ceil(char_count / settings.TOKEN_ESTIMATION_RATIO)
+            stable_id = f"{doc_prefix}_chunk_{chunk_index_counter:06d}"
 
-                if overlap_text:
-                    combined_len = len(overlap_text) + 2 + unit_len
-                    if unit_len >= chunk_size:
-                        # Edge case: unit alone fills/exceeds chunk_size — drop overlap entirely
-                        logger.debug(
-                            "Overlap dropped for document_id '%s': unit exceeds chunk_size independently (%d >= %d)",
-                            document_id, unit_len, chunk_size
-                        )
-                        current_units = [unit]
-                        current_char_count = unit_len
-                    elif combined_len > chunk_size:
-                        # Trim overlap at word boundary to fit within chunk_size
-                        max_overlap_len = chunk_size - 2 - unit_len
-                        if max_overlap_len <= 0:
-                            current_units = [unit]
-                            current_char_count = unit_len
-                        else:
-                            trimmed_overlap = overlap_text[:max_overlap_len]
-                            # Cut at last word boundary to avoid mid-word truncation
-                            last_space = trimmed_overlap.rfind(" ")
-                            if last_space > 0:
-                                trimmed_overlap = trimmed_overlap[:last_space].strip()
-                            else:
-                                trimmed_overlap = trimmed_overlap.strip()
-
-                            if trimmed_overlap:
-                                current_units = [trimmed_overlap, unit]
-                                current_char_count = len(trimmed_overlap) + 2 + unit_len
-                            else:
-                                current_units = [unit]
-                                current_char_count = unit_len
-                    else:
-                        current_units = [overlap_text, unit]
-                        current_char_count = len(overlap_text) + 2 + unit_len
-                else:
-                    current_units = [unit]
-                    current_char_count = unit_len
-            else:
-                current_units.append(unit)
-                current_char_count += (2 if len(current_units) > 1 else 0) + unit_len
-
-        # Flush final chunk
-        if current_units:
-            final_text = "\n\n".join(current_units).strip()
-            if final_text:
-                start_char = full_text.find(final_text[:30], search_start_offset)
-                if start_char == -1:
-                    start_char = search_start_offset
-                end_char = start_char + len(final_text)
-
-                start_page, end_page = self._determine_page_range(start_char, end_char, pages_meta)
-                char_count = len(final_text)
-                word_count = len(final_text.split())
-                sentence_count = self._count_sentences(final_text)
-                estimated_tokens = math.ceil(char_count / settings.TOKEN_ESTIMATION_RATIO)
-                stable_id = f"{doc_prefix}_chunk_{chunk_index_counter:06d}"
-
-                chunks.append(
-                    ChunkItem(
-                        chunk_id=stable_id,
-                        chunk_index=chunk_index_counter,
-                        document_id=document_id,
-                        start_character=start_char,
-                        end_character=end_char,
-                        start_page=start_page,
-                        end_page=end_page,
-                        page_start=start_page,
-                        page_end=end_page,
-                        character_count=char_count,
-                        word_count=word_count,
-                        sentence_count=sentence_count,
-                        estimated_tokens=estimated_tokens,
-                        embedding_status="pending",
-                        embedding_model=None,
-                        vector_dimension=None,
-                        created_at=created_at,
-                        text=final_text
-                    )
+            chunks.append(
+                ChunkItem(
+                    chunk_id=stable_id,
+                    chunk_index=chunk_index_counter,
+                    document_id=document_id,
+                    start_character=start_char,
+                    end_character=end_char,
+                    start_page=start_page,
+                    end_page=end_page,
+                    page_start=start_page,
+                    page_end=end_page,
+                    character_count=char_count,
+                    word_count=word_count,
+                    sentence_count=sentence_count,
+                    estimated_tokens=estimated_tokens,
+                    embedding_status="pending",
+                    embedding_model=None,
+                    vector_dimension=None,
+                    created_at=created_at,
+                    text=chunk_text
                 )
+            )
+            chunk_index_counter += 1
+
+            if unit_idx >= total_units:
+                break
+
+            # Handle overlap: backtrack unit_idx to include units overlapping with end of chunk
+            if chunk_overlap > 0 and len(chunk_units) > 1:
+                overlap_cutoff = end_char - chunk_overlap
+                backtrack_to = None
+                for i in range(len(chunk_units) - 1, 0, -1):
+                    if chunk_units[i][1] >= overlap_cutoff:
+                        backtrack_to = cur_start_idx + i
+                    else:
+                        break
+                if backtrack_to is not None and backtrack_to > cur_start_idx and backtrack_to < unit_idx:
+                    unit_idx = backtrack_to
 
         return chunks
 
@@ -527,7 +496,8 @@ class ChunkingService:
                 except Exception as e:
                     logger.warning("Failed to read chunk_statistics.json for document_id '%s': %s. Re-chunking...", safe_doc_id, str(e))
 
-            logger.info("Chunking started for document_id: '%s'", safe_doc_id)
+            request_id = str(uuid.uuid4())
+            logger.info("[STAGE: CHUNK] request_id=%s document_id='%s' status=started", request_id, safe_doc_id)
             self._update_status(status_path, "running")
             start_time = time.perf_counter()
 
@@ -559,8 +529,8 @@ class ChunkingService:
                 except Exception as pe:
                     logger.warning("Could not read pages.json for document_id '%s': %s", safe_doc_id, str(pe))
 
-            clean_text = self.preprocess_text(raw_text)
-            logger.info("Text preprocessing completed for document_id '%s' (%d clean characters)", safe_doc_id, len(clean_text))
+            clean_text = raw_text if pages_meta else self.preprocess_text(raw_text)
+            logger.info("Text prepared for chunking for document_id '%s' (%d characters, %d pages meta)", safe_doc_id, len(clean_text), len(pages_meta))
 
             # Generate chunks
             chunk_items = self.generate_chunks(
@@ -626,10 +596,12 @@ class ChunkingService:
             )
 
             logger.info(
-                "Chunking completed in %d ms for document_id: '%s' (%d total chunks generated)",
-                chunking_time_ms,
+                "[STAGE: CHUNK] request_id=%s document_id='%s' status=completed elapsed_ms=%d chunks=%d avg_tokens=%d",
+                request_id,
                 safe_doc_id,
-                total_chunks
+                chunking_time_ms,
+                total_chunks,
+                avg_tokens
             )
 
             return ChunkingResponse(

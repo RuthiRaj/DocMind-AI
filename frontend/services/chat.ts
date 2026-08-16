@@ -47,6 +47,8 @@ export async function sendChatMessage(
       chunk_id: source.chunk_id,
       document_id: data.document_id,
       page_number: source.start_page,
+      start_page: source.start_page,
+      end_page: source.end_page,
       text: source.text || '',
       similarity_score: source.score,
       chunk_index: source.chunk_index,

@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 import fitz  # PyMuPDF
@@ -177,7 +178,8 @@ class PDFProcessingService:
                 except Exception as e:
                     logger.warning("Failed to read metadata.json for document_id '%s': %s. Re-running process stage...", safe_doc_id, str(e))
 
-            logger.info("Processing started for document_id: '%s'", safe_doc_id)
+            request_id = str(uuid.uuid4())
+            logger.info("[STAGE: PROCESS] request_id=%s document_id='%s' status=started", request_id, safe_doc_id)
             self._update_status(status_path, "running")
             start_time = time.perf_counter()
 
@@ -287,7 +289,14 @@ class PDFProcessingService:
                 processed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 file_size_bytes = pdf_path.stat().st_size if pdf_path.exists() else 0
 
-                display_filename = title if title else f"{safe_doc_id}.pdf"
+                orig_fn = None
+                if status_path.exists():
+                    try:
+                        with open(status_path, "r", encoding="utf-8") as sf:
+                            orig_fn = json.load(sf).get("original_filename")
+                    except Exception:
+                        pass
+                display_filename = orig_fn or title or f"{safe_doc_id}.pdf"
 
                 # Save metadata to uploads/<document_id>/metadata.json atomically
                 metadata_payload = {
@@ -311,7 +320,14 @@ class PDFProcessingService:
 
                 # Update status.json with processing completion
                 self._update_status(status_path, "completed")
-                logger.info("Processing completed in %d ms for document_id: '%s'", processing_time_ms, safe_doc_id)
+                logger.info(
+                    "[STAGE: PROCESS] request_id=%s document_id='%s' status=completed elapsed_ms=%d pages=%d chars=%d",
+                    request_id,
+                    safe_doc_id,
+                    processing_time_ms,
+                    total_pages,
+                    text_length
+                )
 
                 return PDFProcessingResponse(
                     success=True,

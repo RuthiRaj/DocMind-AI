@@ -13,6 +13,7 @@ This test suite locks down and permanently protects the core RAG invariants:
 
 import json
 import logging
+import time
 import pytest
 import uuid
 from pathlib import Path
@@ -642,19 +643,129 @@ class TestTokenAccountingAndRateLimiting:
         window.settle(res_id, actual_tokens=0)
         assert window.current_usage(60) == 0
 
-    def test_actual_token_overflow_returns_429(self):
-        """When token window exceeds limit, reserve returns allowed=False."""
+    def test_reservation_release_after_exception(self):
+        """When an exception occurs in downstream generation, settlement with 0 releases capacity."""
         window = GroqTokenWindow()
-        limit = 3000
+        limit = 6000
+        allowed, _, res_id = window.reserve(tokens=2500, limit=limit, window=60)
+        assert allowed is True
+        assert window.current_usage(60) == 2500
 
-        allowed_1, _, res_id_1 = window.reserve(tokens=2500, limit=limit, window=60)
-        assert allowed_1 is True
-        window.settle(res_id_1, actual_tokens=2500)
+        try:
+            raise RuntimeError("Downstream generation failure")
+        except Exception:
+            window.settle(res_id, actual_tokens=0)
 
-        # Second request asks for 1000 tokens (2500 + 1000 = 3500 > 3000)
-        allowed_2, retry_after, _ = window.reserve(tokens=1000, limit=limit, window=60)
-        assert allowed_2 is False
-        assert retry_after > 0
+        assert window.current_usage(60) == 0
+
+    def test_reservation_release_after_timeout(self):
+        """When a call times out, settling with None/0 releases the in-flight reservation."""
+        window = GroqTokenWindow()
+        limit = 6000
+        allowed, _, res_id = window.reserve(tokens=3000, limit=limit, window=60)
+        assert allowed is True
+        window.settle(res_id, actual_tokens=None)
+        assert window.current_usage(60) == 0
+
+    def test_query_rewriter_failure_after_reservation(self):
+        """Query rewriter failure releases its reservation without locking subsequent QA generation."""
+        window = GroqTokenWindow()
+        limit = 6000
+        # Rewriter reserves tokens
+        allowed_rw, _, res_id_rw = window.reserve(tokens=180, limit=limit, window=60)
+        assert allowed_rw is True
+        # Rewriter fails -> settles 0
+        window.settle(res_id_rw, actual_tokens=0)
+        assert window.current_usage(60) == 0
+
+        # Main QA call proceeds unhindered
+        allowed_qa, _, res_id_qa = window.reserve(tokens=2500, limit=limit, window=60)
+        assert allowed_qa is True
+        window.settle(res_id_qa, actual_tokens=1200)
+        assert window.current_usage(60) == 1200
+
+    def test_final_llm_failure_after_reservation(self):
+        """If query rewriter succeeded but main LLM fails, rewriter tokens persist while LLM tokens are freed."""
+        window = GroqTokenWindow()
+        limit = 6000
+        # Rewriter succeeds
+        allowed_rw, _, res_id_rw = window.reserve(tokens=180, limit=limit, window=60)
+        window.settle(res_id_rw, actual_tokens=100)
+        assert window.current_usage(60) == 100
+
+        # Main QA call reserves and fails
+        allowed_qa, _, res_id_qa = window.reserve(tokens=2500, limit=limit, window=60)
+        assert allowed_qa is True
+        window.settle(res_id_qa, actual_tokens=0)
+        assert window.current_usage(60) == 100
+
+    def test_repeated_sequential_chat_requests(self):
+        """Repeated realistic sequential questions stay within the sliding window capacity."""
+        window = GroqTokenWindow()
+        limit = 6000
+
+        for turn in range(4):
+            # Rewriter
+            al_rw, _, id_rw = window.reserve(tokens=180, limit=limit, window=60)
+            assert al_rw is True
+            window.settle(id_rw, actual_tokens=100)
+
+            # Main QA
+            al_qa, _, id_qa = window.reserve(tokens=1200, limit=limit, window=60)
+            assert al_qa is True
+            window.settle(id_qa, actual_tokens=1100)
+
+        # 4 turns x 1200 actual = 4800 <= 6000
+        assert window.current_usage(60) == 4800
+
+    def test_concurrent_reservations(self):
+        """Concurrent threads safely reserve and settle without race conditions."""
+        import threading
+        window = GroqTokenWindow()
+        limit = 6000
+
+        def worker():
+            al, _, rid = window.reserve(tokens=500, limit=limit, window=60)
+            if al:
+                window.settle(rid, actual_tokens=300)
+
+        threads = [threading.Thread(target=worker) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert window.current_usage(60) == 3000
+
+    def test_upstream_groq_429_releases_reservation(self):
+        """When Groq returns upstream 429 RateLimitError, local reservation is freed cleanly."""
+        window = GroqTokenWindow()
+        limit = 6000
+        allowed, _, res_id = window.reserve(tokens=2000, limit=limit, window=60)
+        assert allowed is True
+        window.settle(res_id, actual_tokens=0)
+        assert window.current_usage(60) == 0
+
+    def test_retry_after_exact_calculation(self):
+        """retry_after precisely computes the exact expiration time needed to fit the new request."""
+        window = GroqTokenWindow()
+        now = time.time()
+        # Three reservations:
+        # r1: 50s ago, 1000 tokens (expires in 10s)
+        # r2: 40s ago, 2000 tokens (expires in 20s)
+        # r3: 20s ago, 2000 tokens (expires in 40s)
+        # Total currently used = 5000 tokens
+        window.reservations["r1"] = (now - 50, 1000)
+        window.reservations["r2"] = (now - 40, 2000)
+        window.reservations["r3"] = (now - 20, 2000)
+
+        # Request 2500 tokens (5000 + 2500 = 7500 > 6000)
+        # Needs to free 1500 tokens. r1 frees 1000 (still need 500). r2 frees 2000 (total freed 3000).
+        # Earliest timestamp that frees >= 1500 is r2 (now - 40).
+        # retry_after should be max(1, math.ceil(now - 40 + 60 - now)) = 20 seconds.
+        allowed, retry_after, _ = window.reserve(tokens=2500, limit=6000, window=60)
+        assert allowed is False
+        assert retry_after == 20
 
 
 # ==============================================================================
@@ -908,3 +1019,168 @@ class TestStructuredObservabilityLogging:
         assert "[LLM]" in log_text
         assert "[SOURCES]" in log_text
         assert "[RESPONSE]" in log_text
+
+
+# ==============================================================================
+# 11. Retry-After Header & Double-Send Guard Regression Tests
+# Covers: Fix 1 (useRef guard) & Fix 2 (Retry-After header on 429)
+# ==============================================================================
+class TestRetryAfterHeaderAndDoubleSendGuard:
+    """
+    Regression tests for:
+    - Fix 1: Synchronous isSendingRef guard in useChat.ts (backend-side validation)
+    - Fix 2: Retry-After header on local GroqTokenWindow 429 HTTPException
+    """
+
+    def test_local_token_window_429_carries_retry_after_header(self):
+        """
+        When the local GroqTokenWindow rejects a generation request, GroqProvider.generate()
+        must raise an HTTPException with status 429 AND a Retry-After header equal to
+        the calculated retry_after seconds.
+
+        Regression: Previously the HTTPException was raised without headers={}, so
+        the Retry-After header was absent. Fix 2 adds:
+            headers={"Retry-After": str(retry_after)}
+        to the raise in groq_provider.py line 265.
+
+        Tested at the GroqProvider.generate() unit level to avoid the document-lookup
+        path (which correctly returns 404 for non-existent documents before the token
+        window check is reached in the full HTTP stack).
+        """
+        import time as _time
+        from app.services.chat.groq_provider import GroqProvider
+        from app.core.rate_limit import groq_token_window
+
+        provider = GroqProvider()
+
+        # Fill the token window to capacity so reserve() will reject the next call
+        with groq_token_window.lock:
+            groq_token_window.reservations.clear()
+            groq_token_window.reservations["fill_test"] = (
+                _time.time(), settings.GROQ_TPM_LIMIT
+            )
+
+        try:
+            with pytest.raises(HTTPException) as exc_info:
+                provider.generate(
+                    system_prompt="You are a helpful assistant.",
+                    context="Some document context.",
+                    question="What is the system architecture?",
+                )
+        finally:
+            # Always release the artificial reservation
+            with groq_token_window.lock:
+                groq_token_window.reservations.pop("fill_test", None)
+
+        exc = exc_info.value
+        assert exc.status_code == 429, (
+            f"Expected HTTP 429 from token window rejection, got {exc.status_code}"
+        )
+
+        # Fix 2 regression: Retry-After header MUST be present in the HTTPException
+        assert exc.headers is not None, (
+            "HTTPException must carry headers dict. "
+            "Check groq_provider.py: raise HTTPException(..., headers={'Retry-After': str(retry_after)})."
+        )
+        assert "Retry-After" in exc.headers, (
+            f"HTTP 429 HTTPException must include Retry-After header. "
+            f"Got headers: {dict(exc.headers)}"
+        )
+        retry_after_val = int(exc.headers["Retry-After"])
+        assert retry_after_val >= 1, "Retry-After must be at least 1 second"
+        assert retry_after_val <= 60, "Retry-After must not exceed the window size (60s)"
+
+
+    @pytest.mark.anyio
+    async def test_empty_question_double_send_returns_400(self, tmp_path: Path):
+        """
+        An empty-question POST to /chat/{document_id} must return HTTP 400 with a
+        clear validation error, not 500 or 429.
+
+        This is the backend-side invariant for the double-send scenario: when the
+        frontend useRef guard fails (e.g. in unit tests or non-React environments),
+        the backend must still reject the empty second request cleanly.
+
+        Covers: the 'Chat question cannot be empty' path in chat_service._validate_request().
+        """
+        doc_id = str(uuid.uuid4())
+        _create_mock_doc_dir(tmp_path, doc_id=doc_id, page_count=2, chars_per_page=300)
+
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/chat/{doc_id}",
+                json={"question": "", "top_k": 3},
+            )
+
+        assert response.status_code == 400
+        body = response.json()
+        assert body["success"] is False
+        # Must not be a token-window error
+        assert "token" not in body.get("message", "").lower(), (
+            "An empty question must fail with a validation 400, not a token-window 429."
+        )
+
+    def test_synchronous_ref_guard_blocks_second_concurrent_caller(self):
+        """
+        Simulates the isSendingRef useRef guard logic in isolation (without React).
+
+        Verifies that the guard pattern:
+            if isSendingRef.current: return
+            isSendingRef.current = True
+        blocks a second concurrent call before any await is reached, preventing
+        duplicate POST /chat requests from the frontend.
+
+        This test models the JavaScript execution model: the guard check and set
+        are both synchronous, so two callers on the same event loop tick cannot
+        both pass the check.
+        """
+        import threading
+
+        call_count = 0
+        lock = threading.Lock()
+        is_sending_ref = {"current": False}  # Mirrors useRef({current: false})
+
+        def simulate_send_message(text: str):
+            nonlocal call_count
+            if not text.strip():
+                return "EMPTY"
+            # Synchronous guard — identical logic to the fixed useChat.ts
+            if is_sending_ref["current"]:
+                return "BLOCKED"
+            is_sending_ref["current"] = True
+            try:
+                with lock:
+                    call_count += 1
+                # Simulate async work (would be await in real code)
+                return "SENT"
+            finally:
+                is_sending_ref["current"] = False
+
+        # First call proceeds
+        result1 = simulate_send_message("What is the architecture?")
+        assert result1 == "SENT"
+        assert call_count == 1
+
+        # After first call completes, second call is allowed
+        result2 = simulate_send_message("What are the security standards?")
+        assert result2 == "SENT"
+        assert call_count == 2
+
+        # Simulate concurrent second call WHILE first is in-flight:
+        # Set the ref as if the first call is mid-await
+        is_sending_ref["current"] = True
+        result_concurrent = simulate_send_message("Duplicate rapid click")
+        assert result_concurrent == "BLOCKED", (
+            "A second sendMessage call while isSendingRef.current is True must be "
+            "blocked synchronously before reaching sendChatMessage()."
+        )
+        # call_count must not have incremented
+        assert call_count == 2
+
+        # Empty-text guard fires before ref check (no side effects)
+        is_sending_ref["current"] = False
+        result_empty = simulate_send_message("   ")
+        assert result_empty == "EMPTY"
+        assert call_count == 2

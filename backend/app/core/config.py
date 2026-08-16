@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     DEFAULT_TOP_K: int = 25
 
     # PDF Upload Configuration Settings
-    # MAX_UPLOAD_SIZE is loaded from env above
+    UPLOAD_STREAM_CHUNK_BYTES: int = 1048576  # 1 MB buffer for streaming chunk writes
 
     # Text Chunking Engine Configuration Settings
     CHUNK_VERSION: str = "1.0"  # Version identifier for chunking engine schema
@@ -70,20 +70,28 @@ class Settings(BaseSettings):
     ENABLE_HYBRID_SEARCH: bool = True  # Enable BM25 + Vector Hybrid Retrieval
     BM25_K1: float = 1.5  # Term frequency saturation parameter
     BM25_B: float = 0.75  # Length normalization parameter
+    BM25_DEFAULT_SIMILARITY_SCORE: float = 0.40  # Default vector similarity score for BM25-only matches
     RRF_K: int = 60  # Reciprocal Rank Fusion constant
+    RRF_FUSED_SCORE_FLOOR: float = 0.45  # Score floor for top hybrid RRF matches
     ENABLE_RERANKER: bool = True  # Enable cross-scoring reranking pass
     RERANKER_TOP_K: int = 10  # Maximum candidate chunks to retain after reranking
     ENABLE_SELECTIVE_QUERY_REWRITING: bool = True  # Selectively trigger LLM query expansion
     REWRITE_MIN_WORD_COUNT: int = 5  # Minimum word count required to trigger query rewriter LLM
+    QUERY_REWRITE_TIMEOUT_SECONDS: int = 10  # Timeout in seconds for query rewrite LLM call
+    QUERY_REWRITE_MAX_TOKENS: int = 100  # Max completion tokens for query rewriter
+    QUERY_REWRITE_TEMPERATURE: float = 0.3  # Temperature for query expansion LLM
     RETRIEVAL_VERSION: str = "1.0"  # Version of the retrieval engine schema
 
     # AI Chat (RAG) Engine Configuration Settings
     LLM_PROVIDER: str = "groq"  # Default large language model API provider
     LLM_TEMPERATURE: float = 0.2  # Control generation determinism
     LLM_MAX_TOKENS: int = 1024  # Maximum completion token length
-    MAX_CONTEXT_CHUNKS: int = 10  # Maximum number of document chunks allowed in prompt context
-    MAX_CONTEXT_CHARACTERS: int = 10000  # Upper context size characters limit
-    MAX_CONTEXT_LENGTH: int = 10000  # Configurable upper context character limit
+    GROQ_PREFLIGHT_HEADROOM_FLOOR: int = 1500  # Minimum token headroom floor for prompt assembly
+    GROQ_COMPLETION_RESERVE_TOKENS: int = 256  # Reserve tokens allocated for completion generation
+    CONTEXT_TRIM_DECAY_RATE: float = 0.9  # Truncation ratio applied during iterative context trimming
+    MAX_CONTEXT_CHUNKS: int = 5  # Maximum number of document chunks allowed in prompt context
+    MAX_CONTEXT_CHARACTERS: int = 4500  # Upper context size characters limit
+    MAX_CONTEXT_LENGTH: int = 4500  # Configurable upper context character limit
     LLM_TIMEOUT: int = 30  # Timeout threshold in seconds for API completions call
     CHAT_VERSION: str = "1.0"  # Chat engine version identifier
     SYSTEM_PROMPT_VERSION: str = "1.0"  # Core system prompt version
@@ -94,13 +102,13 @@ class Settings(BaseSettings):
     MODEL_CONTEXT_WINDOW: int = 131072  # llama-3.1-8b-instant context window in tokens
     ENABLE_FULL_CONTEXT_ROUTING: bool = False  # Default to RAG retrieval mode; FULL_CONTEXT must be explicitly enabled
     FULL_CONTEXT_MAX_CHARS: int = 10000  # Max document chars for full-context mode under Groq TPM limits
-    CONVERSATION_MAX_TURNS: int = 10  # Max conversation turns to keep in memory per session
-    CONVERSATION_MAX_TOKENS: int = 4000  # Token budget reserved for conversation history
+    CONVERSATION_MAX_TURNS: int = 4  # Max conversation turns to keep in memory per session
+    CONVERSATION_MAX_TOKENS: int = 1500  # Token budget reserved for conversation history
 
     # API Rate Limiting Configuration Settings
     GENERAL_REQUEST_LIMIT: int = 100  # Default general request limit per client IP
     GENERAL_REQUEST_WINDOW_SECONDS: int = 60  # Default time window in seconds
-    EXPENSIVE_REQUEST_LIMIT: int = 10  # Stricter request limit for expensive/LLM endpoints
+    EXPENSIVE_REQUEST_LIMIT: int = 30  # Stricter request limit for expensive/LLM endpoints (aligned with Groq 30 RPM)
     EXPENSIVE_REQUEST_WINDOW_SECONDS: int = 60  # Time window for expensive/LLM endpoints
 
     # Resource Safety Limit Settings

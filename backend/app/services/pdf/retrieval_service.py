@@ -451,12 +451,12 @@ class RetrievalService:
                     chunk_obj = cand[0]
                     cid = chunk_obj.get("chunk_id") if isinstance(chunk_obj, dict) else getattr(chunk_obj, "chunk_id")
                     if cid not in combined_chunks:
-                        combined_chunks[cid] = (chunk_obj, 0.40)
+                        combined_chunks[cid] = (chunk_obj, settings.BM25_DEFAULT_SIMILARITY_SCORE)
 
                 hybrid_candidates = []
                 for cid, (chunk_obj, v_score) in combined_chunks.items():
                     fused_rrf = rrf_scores.get(cid, 0.0)
-                    combined_score = max(v_score, 0.45) if cid in rrf_scores else v_score
+                    combined_score = max(v_score, settings.RRF_FUSED_SCORE_FLOOR) if cid in rrf_scores else v_score
                     hybrid_candidates.append((combined_score, chunk_obj, fused_rrf))
 
                 hybrid_candidates.sort(key=lambda x: (x[2], x[0]), reverse=True)

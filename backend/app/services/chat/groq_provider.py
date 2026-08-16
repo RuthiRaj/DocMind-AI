@@ -80,7 +80,13 @@ def _preflight_trim_messages(messages: list) -> tuple[list, bool]:
     Returns:
         tuple[list, bool]: Trimmed messages and whether any history/context was removed.
     """
-    budget = settings.GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET
+    # Dynamically compute remaining available prompt token budget from rolling token window
+    from app.core.rate_limit import groq_token_window
+    current_used = groq_token_window.current_usage(window=60)
+    remaining_window = max(0, settings.GROQ_TPM_LIMIT - current_used)
+    completion_reserve = min(settings.LLM_MAX_TOKENS, settings.GROQ_COMPLETION_RESERVE_TOKENS)
+    available_headroom = max(settings.GROQ_PREFLIGHT_HEADROOM_FLOOR, remaining_window - completion_reserve)
+    budget = min(settings.GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET, available_headroom)
     working = list(messages)
     truncated = False
     original_tokens = _estimate_messages_tokens(messages)
@@ -242,7 +248,8 @@ class GroqProvider(LLMProvider):
             serialized_payload_bytes,
         )
 
-        request_tokens = estimated_prompt_tokens + self._max_tokens
+        completion_reserve = min(self._max_tokens, 256)
+        request_tokens = estimated_prompt_tokens + completion_reserve
         reserve_res = groq_token_window.reserve(
             tokens=request_tokens,
             limit=settings.GROQ_TPM_LIMIT,
@@ -263,20 +270,24 @@ class GroqProvider(LLMProvider):
 
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"The AI service token limit is temporarily exhausted. Please try again in {retry_after} seconds."
+                detail=f"The AI service token limit is temporarily exhausted. Please try again in {retry_after} seconds.",
+                headers={"Retry-After": str(retry_after)},
             )
+
 
         logger.info("Submitting query request to Groq (%s) with timeout=%ds...", self._model, self._timeout)
         
         try:
-            # Synchronous non-streaming completions request
-            chat_completion = client.chat.completions.create(
+            # Synchronous completions request capturing raw HTTP response headers
+            raw_response = client.chat.completions.with_raw_response.create(
                 messages=messages,
                 model=self._model,
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
                 timeout=self._timeout
             )
+            chat_completion = raw_response.parse()
+            headers = dict(raw_response.headers)
 
             if not chat_completion.choices or len(chat_completion.choices) == 0:
                 raise ValueError("Groq returned completion response containing zero choices.")
@@ -287,19 +298,49 @@ class GroqProvider(LLMProvider):
 
             # Settle token window with actual usage if provided by Groq
             usage_obj = getattr(chat_completion, "usage", None)
+            prompt_tokens = int(getattr(usage_obj, "prompt_tokens", 0)) if usage_obj else estimated_prompt_tokens
+            completion_tokens = int(getattr(usage_obj, "completion_tokens", 0)) if usage_obj else (len(answer) // 4)
             actual_total_tokens = getattr(usage_obj, "total_tokens", None) if usage_obj else None
-            if isinstance(actual_total_tokens, (int, float)) and actual_total_tokens > 0:
-                groq_token_window.settle(res_id, actual_tokens=int(actual_total_tokens))
-                logger.info(
-                    "[LLM] Groq usage settled: prompt=%s completion=%s total=%d (reserved=%d)",
-                    str(getattr(usage_obj, "prompt_tokens", 0)),
-                    str(getattr(usage_obj, "completion_tokens", 0)),
-                    int(actual_total_tokens),
-                    request_tokens
-                )
-            else:
-                groq_token_window.settle(res_id, actual_tokens=estimated_prompt_tokens + len(answer) // 4)
 
+            if isinstance(actual_total_tokens, (int, float)) and actual_total_tokens > 0:
+                total_tokens = int(actual_total_tokens)
+                groq_token_window.settle(res_id, actual_tokens=total_tokens)
+            else:
+                total_tokens = prompt_tokens + completion_tokens
+                groq_token_window.settle(res_id, actual_tokens=total_tokens)
+
+            # Extract rate limit quota headers from Groq response
+            rl_headers = {
+                "remaining_tokens": headers.get("x-ratelimit-remaining-tokens"),
+                "limit_tokens": headers.get("x-ratelimit-limit-tokens"),
+                "reset_tokens": headers.get("x-ratelimit-reset-tokens"),
+                "remaining_requests": headers.get("x-ratelimit-remaining-requests"),
+                "limit_requests": headers.get("x-ratelimit-limit-requests"),
+                "reset_requests": headers.get("x-ratelimit-reset-requests"),
+            }
+
+            from app.core.telemetry import groq_telemetry
+            groq_telemetry.record_call(
+                call_type="chat_completion",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                ratelimit_headers=rl_headers,
+                query=question,
+                extra={"context_mode": context_mode, "model": self._model}
+            )
+
+            logger.info(
+                "[GROQ_TELEMETRY] call=chat_completion prompt_tokens=%d completion_tokens=%d total_tokens=%d "
+                "remaining_tokens=%s limit_tokens=%s reset_tokens=%s remaining_requests=%s",
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                rl_headers.get("remaining_tokens"),
+                rl_headers.get("limit_tokens"),
+                rl_headers.get("reset_tokens"),
+                rl_headers.get("remaining_requests"),
+            )
 
             return answer, preflight_truncated
 

@@ -45,8 +45,8 @@ class RateLimiter:
                 self.history[client_key] = timestamps
                 # Retry-After is window duration minus time elapsed since the oldest active timestamp
                 oldest = timestamps[0]
-                retry_after = int(oldest + window - now)
-                return False, max(1, retry_after)
+                retry_after = max(1, int(math.ceil(oldest + window - now)))
+                return False, retry_after
 
     def _clean_all_expired(self, now: float, cutoff: float) -> None:
         """
@@ -69,6 +69,7 @@ class RateLimiter:
 rate_limiter = RateLimiter()
 
 
+import math
 import uuid
 
 class GroqTokenWindow:
@@ -95,8 +96,22 @@ class GroqTokenWindow:
 
             used_tokens = sum(t[1] for t in self.reservations.values())
             if used_tokens + tokens > limit:
-                oldest = min((t[0] for t in self.reservations.values()), default=now)
-                retry_after = max(1, int(oldest + window - now))
+                if tokens > limit:
+                    # Single request exceeds the entire window capacity
+                    return False, window, ""
+
+                # Calculate the exact timestamp when enough reservations will expire
+                # such that (used_tokens - accumulated_freed) + tokens <= limit
+                sorted_reservations = sorted(self.reservations.values(), key=lambda x: x[0])
+                accumulated_freed = 0
+                needed_ts = now
+                for ts, tok in sorted_reservations:
+                    accumulated_freed += tok
+                    if (used_tokens - accumulated_freed) + tokens <= limit:
+                        needed_ts = ts
+                        break
+
+                retry_after = max(1, int(math.ceil(needed_ts + window - now)))
                 return False, retry_after, ""
 
             res_id = str(uuid.uuid4())

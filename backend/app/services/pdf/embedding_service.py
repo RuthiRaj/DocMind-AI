@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
@@ -183,7 +184,8 @@ class EmbeddingService:
                 except Exception as e:
                     logger.warning("Failed to read embedding_metadata.json for document_id '%s': %s. Re-embedding...", safe_doc_id, str(e))
 
-            logger.info("Embedding started for document_id: '%s'", safe_doc_id)
+            request_id = str(uuid.uuid4())
+            logger.info("[STAGE: EMBED] request_id=%s document_id='%s' status=started", request_id, safe_doc_id)
             self._update_status(status_path, "running")
             start_time = time.perf_counter()
 
@@ -337,7 +339,14 @@ class EmbeddingService:
                     "indexing_status": "pending" # Reset downstream stage
                 }
             )
-            logger.info("Embedding completed for document_id '%s' in %d ms.", safe_doc_id, processing_time_ms)
+            logger.info(
+                "[STAGE: EMBED] request_id=%s document_id='%s' status=completed elapsed_ms=%d vectors=%d dim=%d",
+                request_id,
+                safe_doc_id,
+                processing_time_ms,
+                len(texts),
+                self.provider.dimension()
+            )
 
             return EmbeddingResponse(
                 success=True,

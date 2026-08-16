@@ -182,7 +182,14 @@ class ChatService:
         Returns:
             tuple: (trimmed_history, trimmed_chunks, context, context_truncated)
         """
-        budget = settings.GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET
+        # Dynamically compute remaining available prompt token budget from rolling token window
+        from app.core.rate_limit import groq_token_window
+        current_used = groq_token_window.current_usage(window=60)
+        remaining_window = max(0, settings.GROQ_TPM_LIMIT - current_used)
+        completion_reserve = min(settings.LLM_MAX_TOKENS, settings.GROQ_COMPLETION_RESERVE_TOKENS)
+        available_headroom = max(settings.GROQ_PREFLIGHT_HEADROOM_FLOOR, remaining_window - completion_reserve)
+        budget = min(settings.GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET, available_headroom)
+
         payload_too_large_detail = (
             "Document context too large for the AI model — "
             "try a more specific question or a shorter document."
@@ -222,7 +229,7 @@ class ChatService:
             while context and self._estimate_groq_prompt_tokens(
                 system_prompt, context, question, trimmed_history or None
             ) > budget:
-                context = context[: max(0, int(len(context) * 0.9))]
+                context = context[: max(0, int(len(context) * settings.CONTEXT_TRIM_DECAY_RATE))]
 
         final_tokens = self._estimate_groq_prompt_tokens(
             system_prompt, context, question, trimmed_history or None
@@ -541,19 +548,27 @@ class ChatService:
         conversation_store.add_turn(safe_doc_id, session_id, request.question, answer)
 
         # 11. Authoritative Citation Construction: Exclusively from surviving context chunks
+        fallback_phrases = [
+            "i couldn't find enough information in this document",
+            "i cannot find enough information in this document",
+            "not enough information in this document"
+        ]
+        is_fallback_answer = any(phrase in answer.lower() for phrase in fallback_phrases)
+
         sources: List[SourceChunk] = []
-        for chunk in cleaned_chunks:
-            sources.append(
-                SourceChunk(
-                    chunk_id=chunk.chunk_id,
-                    chunk_index=chunk.chunk_index,
-                    last_chunk_index=getattr(chunk, "last_chunk_index", None) if hasattr(chunk, "last_chunk_index") else (chunk.get("last_chunk_index", None) if isinstance(chunk, dict) else None),
-                    score=round(chunk.score, 4),
-                    start_page=chunk.start_page,
-                    end_page=chunk.end_page,
-                    text=chunk.text
+        if not is_fallback_answer:
+            for chunk in cleaned_chunks:
+                sources.append(
+                    SourceChunk(
+                        chunk_id=chunk.chunk_id,
+                        chunk_index=chunk.chunk_index,
+                        last_chunk_index=getattr(chunk, "last_chunk_index", None) if hasattr(chunk, "last_chunk_index") else (chunk.get("last_chunk_index", None) if isinstance(chunk, dict) else None),
+                        score=round(chunk.score, 4),
+                        start_page=chunk.start_page,
+                        end_page=chunk.end_page,
+                        text=chunk.text
+                    )
                 )
-            )
 
         source_pages = sorted({s.start_page for s in sources} | {s.end_page for s in sources})
         logger.info(

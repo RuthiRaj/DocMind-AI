@@ -76,3 +76,54 @@ def prune_debug_list(
             pass
 
     return debug_list
+
+
+class GroqTelemetryTracker:
+    """Thread-safe ring buffer recording actual live Groq API telemetry metrics."""
+    def __init__(self, max_history: int = 50):
+        import threading
+        self._lock = threading.Lock()
+        self._max_history = max_history
+        self._history: List[dict] = []
+
+    def record_call(
+        self,
+        call_type: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        ratelimit_headers: dict,
+        query: str = "",
+        request_id: str = "",
+        extra: dict | None = None
+    ) -> dict:
+        import time
+        from datetime import datetime, timezone
+        entry = {
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "call_type": call_type,
+            "request_id": request_id,
+            "query": query[:120],
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "remaining_tokens": ratelimit_headers.get("x-ratelimit-remaining-tokens") or ratelimit_headers.get("remaining_tokens"),
+            "limit_tokens": ratelimit_headers.get("x-ratelimit-limit-tokens") or ratelimit_headers.get("limit_tokens"),
+            "reset_tokens": ratelimit_headers.get("x-ratelimit-reset-tokens") or ratelimit_headers.get("reset_tokens"),
+            "remaining_requests": ratelimit_headers.get("x-ratelimit-remaining-requests") or ratelimit_headers.get("remaining_requests"),
+            "limit_requests": ratelimit_headers.get("x-ratelimit-limit-requests") or ratelimit_headers.get("limit_requests"),
+            "raw_headers": ratelimit_headers,
+            "extra": extra or {}
+        }
+        with self._lock:
+            self._history.append(entry)
+            if len(self._history) > self._max_history:
+                self._history.pop(0)
+        return entry
+
+    def get_recent(self, count: int = 5) -> List[dict]:
+        with self._lock:
+            return list(self._history[-count:])
+
+
+groq_telemetry = GroqTelemetryTracker()

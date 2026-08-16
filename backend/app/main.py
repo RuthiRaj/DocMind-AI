@@ -88,6 +88,16 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             hint = "Limit upload size to match application settings parameters."
         else:
             hint = "The request payload exceeds the allowed size limit."
+    elif exc.status_code == 429:
+        error_code = "RATE_LIMIT_EXCEEDED"
+        retry_after = None
+        if exc.headers:
+            retry_after = exc.headers.get("Retry-After")
+        hint = (
+            f"Please wait {retry_after} seconds before retrying."
+            if retry_after
+            else "Please wait a moment before retrying your request."
+        )
     elif exc.status_code == 400:
         if "uuid" in str(message).lower() or "document id" in str(message).lower():
             error_code = "INVALID_DOCUMENT_ID"
@@ -96,8 +106,13 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             error_code = "CHUNK_VALIDATION_FAILED"
             hint = "Validate file structure content bounds."
 
+    # Forward any headers set on the HTTPException (e.g. Retry-After from
+    # GroqProvider.generate()) into the JSON response so clients receive them.
+    response_headers = dict(exc.headers) if exc.headers else None
+
     return JSONResponse(
         status_code=exc.status_code,
+        headers=response_headers,
         content={
             "success": False,
             "error_code": error_code,

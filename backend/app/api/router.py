@@ -5,7 +5,7 @@ Combines all sub-routers and endpoints into a unified API router instance.
 """
 
 from fastapi import APIRouter
-from app.api.endpoints import router as health_router
+from app.api.routes.system import router as system_router
 from app.api.routes.upload import router as upload_router
 from app.api.routes.processing import router as processing_router
 from app.api.routes.chunking import router as chunking_router
@@ -18,8 +18,8 @@ from app.api.routes.maintenance import router as maintenance_router
 
 api_router = APIRouter()
 
-# Register health check routes
-api_router.include_router(health_router, tags=["System Status"])
+# Register health and system telemetry routes
+api_router.include_router(system_router, tags=["System Status"])
 
 # Register PDF upload routes
 api_router.include_router(upload_router, tags=["PDF Ingestion"])

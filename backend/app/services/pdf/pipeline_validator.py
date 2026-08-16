@@ -162,8 +162,8 @@ def validate_embedding_artifacts(doc_dir: Path) -> Tuple[bool, str]:
                 chunks_data = json.load(f)
             if len(chunks_data) != embeddings.shape[0]:
                 return False, f"Embeddings count ({embeddings.shape[0]}) does not match chunks count ({len(chunks_data)})."
-        except Exception:
-            pass
+        except Exception as err:
+            logger.warning("Failed to parse chunks.json during embedding validation for %s: %s", doc_dir.name, str(err))
 
     return True, "Embedding artifacts are valid."
 
@@ -206,8 +206,8 @@ def validate_indexing_artifacts(doc_dir: Path) -> Tuple[bool, str]:
                 chunks_data = json.load(f)
             if len(chunks_data) != indexed_vectors:
                 return False, f"Indexed vectors count ({indexed_vectors}) does not match chunks count ({len(chunks_data)})."
-        except Exception:
-            pass
+        except Exception as err:
+            logger.warning("Failed to parse chunks.json during index validation for %s: %s", doc_dir.name, str(err))
 
     return True, "Indexing artifacts are valid."
 
