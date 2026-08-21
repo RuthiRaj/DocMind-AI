@@ -88,9 +88,9 @@ class Settings(BaseSettings):
     # AI Chat (RAG) Engine Configuration Settings
     LLM_PROVIDER: str = "groq"  # Default large language model API provider
     LLM_TEMPERATURE: float = 0.2  # Control generation determinism
-    LLM_MAX_TOKENS: int = 1024  # Maximum completion token length (supports reasoning tokens + full response)
+    LLM_MAX_TOKENS: int = 1536  # Maximum completion token length (supports reasoning tokens + full multi-chunk response)
     GROQ_PREFLIGHT_HEADROOM_FLOOR: int = 1000  # Minimum token headroom floor for prompt assembly
-    GROQ_COMPLETION_RESERVE_TOKENS: int = 1024  # Reserve tokens allocated for completion generation
+    GROQ_COMPLETION_RESERVE_TOKENS: int = 1536  # Reserve tokens allocated for completion generation
     GROQ_MAX_QUEUE_WAIT_SECONDS: float = 25.0  # Maximum seconds to queue in-memory before returning 429
     GROQ_SOFT_CAP_RATIO: float = 0.85  # Soft cap threshold (85% of token window) to return graceful busy message
     GROQ_BUSY_MESSAGE: str = "This demo is currently busy with other visitors — please try again in about a minute."

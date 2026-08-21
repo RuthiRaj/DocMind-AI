@@ -375,17 +375,31 @@ class GroqProvider(LLMProvider):
                 raise ValueError("Groq returned completion response containing zero choices.")
 
             msg_obj = chat_completion.choices[0].message
-            answer = msg_obj.content
-            if not answer or not answer.strip():
-                # Never return internal reasoning tokens to the user as final answer
-                finish_reason = getattr(chat_completion.choices[0], "finish_reason", "unknown")
-                reasoning_text = getattr(msg_obj, "reasoning", "") or ""
-                logger.warning(
-                    "Groq response content is empty (finish_reason=%s, reasoning_tokens_present=%s). Returning grounded fallback.",
-                    finish_reason,
-                    bool(reasoning_text.strip())
-                )
-                answer = "I couldn't find enough information in the provided document to answer your question."
+            content = (msg_obj.content or "").strip()
+            finish_reason = getattr(chat_completion.choices[0], "finish_reason", "unknown")
+            reasoning_text = getattr(msg_obj, "reasoning", "") or ""
+
+            if content:
+                answer = content
+            else:
+                # Content is empty
+                if finish_reason == "length" and final_chunks_count > 0:
+                    logger.warning(
+                        "Groq generation truncated during reasoning (finish_reason=length, reasoning_len=%d, chunks=%d). Returning honest synthesis guidance.",
+                        len(reasoning_text),
+                        final_chunks_count
+                    )
+                    answer = (
+                        "This question involves synthesizing a substantial amount of information across the document. "
+                        "Please try asking a more focused question about a specific component or section."
+                    )
+                else:
+                    logger.warning(
+                        "Groq response content is empty (finish_reason=%s, reasoning_tokens_present=%s). Returning grounded fallback.",
+                        finish_reason,
+                        bool(reasoning_text.strip())
+                    )
+                    answer = "I couldn't find enough information in this document to answer your question."
 
             # Settle token window with actual usage if provided by Groq
             usage_obj = getattr(chat_completion, "usage", None)
