@@ -88,9 +88,13 @@ class Settings(BaseSettings):
     # AI Chat (RAG) Engine Configuration Settings
     LLM_PROVIDER: str = "groq"  # Default large language model API provider
     LLM_TEMPERATURE: float = 0.2  # Control generation determinism
-    LLM_MAX_TOKENS: int = 1536  # Maximum completion token length (supports reasoning tokens + full multi-chunk response)
+    LLM_MAX_TOKENS: int = 1536  # Baseline completion token length
+    ENABLE_DYNAMIC_TOKEN_BUDGETING: bool = True  # Dynamically compute completion tokens based on retrieval complexity
+    LLM_MIN_COMPLETION_TOKENS: int = 768  # Budget for narrow/focused queries (1-2 chunks)
+    LLM_DEFAULT_COMPLETION_TOKENS: int = 1536  # Budget for moderate queries (3-5 chunks)
+    LLM_MAX_COMPLETION_TOKENS: int = 3072  # Ceiling budget for broad multi-chunk synthesis (6+ chunks)
     GROQ_PREFLIGHT_HEADROOM_FLOOR: int = 1000  # Minimum token headroom floor for prompt assembly
-    GROQ_COMPLETION_RESERVE_TOKENS: int = 1536  # Reserve tokens allocated for completion generation
+    GROQ_COMPLETION_RESERVE_TOKENS: int = 1536  # Default reserve tokens allocated for completion generation
     GROQ_MAX_QUEUE_WAIT_SECONDS: float = 25.0  # Maximum seconds to queue in-memory before returning 429
     GROQ_SOFT_CAP_RATIO: float = 0.85  # Soft cap threshold (85% of token window) to return graceful busy message
     GROQ_BUSY_MESSAGE: str = "This demo is currently busy with other visitors — please try again in about a minute."
@@ -180,9 +184,70 @@ class Settings(BaseSettings):
     )
 
 
+
+def validate_config_drift(cfg: Settings) -> list[str]:
+    """
+    Validates runtime settings against documented defaults in .env.example
+    and baseline production safety thresholds to prevent silent configuration drift.
+
+    Returns:
+        list[str]: Any detected drift warning messages.
+    """
+    warnings: list[str] = []
+    
+    # 1. Check reasoning-model completion headroom thresholds
+    if cfg.LLM_MAX_TOKENS < 1024:
+        warnings.append(
+            f"LLM_MAX_TOKENS is set to {cfg.LLM_MAX_TOKENS} (recommended: >=1536). "
+            "Reasoning models like gpt-oss-20b may exhaust tokens during chain-of-thought and truncate responses."
+        )
+    if cfg.GROQ_COMPLETION_RESERVE_TOKENS < 1024:
+        warnings.append(
+            f"GROQ_COMPLETION_RESERVE_TOKENS is set to {cfg.GROQ_COMPLETION_RESERVE_TOKENS} (recommended: >=1536). "
+            "Token rate-limit reservations may underestimate completion costs."
+        )
+
+    # 2. Check against .env.example if available
+    from pathlib import Path
+    candidate_example_paths = [
+        Path(__file__).resolve().parent.parent.parent / ".env.example",
+        Path(__file__).resolve().parent.parent / ".env.example",
+        Path(".env.example"),
+        Path("backend/.env.example")
+    ]
+    for example_path in candidate_example_paths:
+        if example_path.exists():
+            try:
+                with open(example_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        k, v = k.strip(), v.strip()
+                        if k in ("LLM_MAX_TOKENS", "GROQ_COMPLETION_RESERVE_TOKENS") and v.isdigit():
+                            expected_val = int(v)
+                            actual_val = getattr(cfg, k, None)
+                            if actual_val is not None and actual_val < expected_val:
+                                warnings.append(
+                                    f"Configuration drift detected for {k}: active value={actual_val} is less than .env.example default={expected_val}."
+                                )
+                break
+            except Exception:
+                pass
+
+    return warnings
+
+
 # Instantiated settings object to be imported across the application
 try:
     settings = Settings()
+    _drift_warnings = validate_config_drift(settings)
+    if _drift_warnings:
+        import logging
+        _logger = logging.getLogger("app.core.config")
+        for _w in _drift_warnings:
+            _logger.warning("[CONFIG_DRIFT_WARNING] %s", _w)
 except ValidationError as exc:
     print("\n" + "="*80, file=sys.stderr)
     print("CRITICAL CONFIGURATION ERROR: Failed to validate environment settings.", file=sys.stderr)
@@ -194,3 +259,4 @@ except ValidationError as exc:
     print("\nHelp: Please verify that you have copied backend/.env.example to backend/.env", file=sys.stderr)
     print("and set a valid GROQ_API_KEY variable value.\n" + "="*80 + "\n", file=sys.stderr)
     sys.exit(1)
+

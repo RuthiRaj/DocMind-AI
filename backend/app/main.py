@@ -47,6 +47,12 @@ async def lifespan(fastapi_app: FastAPI):
                 "GROQ_API_KEY is not configured. AI Chat queries will require an active key. "
                 "See backend/.env.example and obtain a free key at https://console.groq.com/keys"
             )
+
+        # Validate configuration drift against baseline safety budgets
+        from app.core.config import validate_config_drift
+        drift_warnings = validate_config_drift(settings)
+        for dw in drift_warnings:
+            logger.warning("[STARTUP_CONFIG_DRIFT] %s", dw)
     except Exception as exc:
         logger.critical("CRITICAL: Failed to load embedding model on startup: %s", str(exc), exc_info=True)
         # Fail startup cleanly by exiting the process

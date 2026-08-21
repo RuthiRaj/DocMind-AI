@@ -185,6 +185,36 @@ class GroqProvider(LLMProvider):
 
         return GroqProvider._client_instance
 
+    @classmethod
+    def calculate_completion_budget(
+        cls,
+        final_chunks_count: int = 0,
+        context_chars: int = 0,
+        question: str = ""
+    ) -> int:
+        """
+        Calculates dynamic completion token budget based on query & context complexity:
+        - Tier 1 (Narrow / 1-2 chunks / <= 2000 chars): 768 tokens (LLM_MIN_COMPLETION_TOKENS)
+        - Tier 2 (Moderate / 3-5 chunks / 2001-5000 chars): 1536 tokens (LLM_DEFAULT_COMPLETION_TOKENS)
+        - Tier 3 (Broad Multi-Chunk Synthesis / >= 6 chunks / > 5000 chars): 3072 tokens (LLM_MAX_COMPLETION_TOKENS)
+        """
+        if not getattr(settings, "ENABLE_DYNAMIC_TOKEN_BUDGETING", True):
+            return getattr(settings, "LLM_MAX_TOKENS", 1536)
+
+        min_tokens = getattr(settings, "LLM_MIN_COMPLETION_TOKENS", 768)
+        default_tokens = getattr(settings, "LLM_DEFAULT_COMPLETION_TOKENS", 1536)
+        max_tokens = getattr(settings, "LLM_MAX_COMPLETION_TOKENS", 3072)
+
+        # Tier 3: Broad multi-chunk architectural or synthesis questions (6+ chunks or >= 5000 chars)
+        if final_chunks_count >= 6 or context_chars >= 5000:
+            return max_tokens
+        # Tier 1: Narrow context / focused question (1-2 chunks or <= 2000 chars when few chunks)
+        elif (final_chunks_count > 0 and final_chunks_count <= 2) or (final_chunks_count == 0 and 0 < context_chars <= 2000):
+            return min_tokens
+        # Tier 2: Moderate component-level questions (3-5 chunks / 2001-4999 chars)
+        else:
+            return default_tokens
+
     def generate(
         self,
         system_prompt: str,
@@ -235,11 +265,18 @@ class GroqProvider(LLMProvider):
 
         messages, preflight_truncated = _preflight_trim_messages(messages)
 
+        # Dynamically compute completion token headroom based on context and retrieval complexity
+        completion_reserve = self.calculate_completion_budget(
+            final_chunks_count=final_chunks_count,
+            context_chars=len(context),
+            question=question
+        )
+
         request_payload = {
             "messages": messages,
             "model": self._model,
             "temperature": self._temperature,
-            "max_tokens": self._max_tokens,
+            "max_tokens": completion_reserve,
         }
         total_prompt_chars = sum(len(message.get("content", "")) for message in messages)
         estimated_prompt_tokens = (
@@ -249,18 +286,18 @@ class GroqProvider(LLMProvider):
 
         logger.info(
             "Groq request diagnostics: context_mode=%s context_chars=%d estimated_prompt_tokens=%d "
-            "max_output_tokens=%d serialized_payload_bytes=%d",
+            "completion_budget=%d max_output_tokens=%d serialized_payload_bytes=%d",
             context_mode,
             len(context),
             estimated_prompt_tokens,
-            self._max_tokens,
+            completion_reserve,
+            completion_reserve,
             serialized_payload_bytes,
         )
 
         session_tag = kwargs.get("session_id") or (request_id[:8] if request_id else "N/A")
 
-        # Pessimistic worst-case completion reserve based on full configured max_tokens cap
-        completion_reserve = self._max_tokens
+        # Dynamic completion reservation based on tier budget for this specific request
         request_tokens = estimated_prompt_tokens + completion_reserve
         reserve_res = groq_token_window.reserve(
             tokens=request_tokens,
@@ -365,7 +402,7 @@ class GroqProvider(LLMProvider):
                 messages=messages,
                 model=self._model,
                 temperature=self._temperature,
-                max_tokens=self._max_tokens,
+                max_tokens=completion_reserve,
                 timeout=self._timeout
             )
             chat_completion = raw_response.parse()
@@ -379,14 +416,19 @@ class GroqProvider(LLMProvider):
             finish_reason = getattr(chat_completion.choices[0], "finish_reason", "unknown")
             reasoning_text = getattr(msg_obj, "reasoning", "") or ""
 
-            if content:
+            # Check whether content contains substantive alphanumeric text (not just whitespace or bare markdown control delimiters like '**' or '* ')
+            has_substantive_content = bool(re.search(r"[A-Za-z0-9]", content))
+
+            if has_substantive_content:
+                # Substantive content exists — preserve complete or partial answer
                 answer = content
             else:
-                # Content is empty
+                # Content is empty or contains only non-substantive markdown syntax
                 if finish_reason == "length" and final_chunks_count > 0:
                     logger.warning(
-                        "Groq generation truncated during reasoning (finish_reason=length, reasoning_len=%d, chunks=%d). Returning honest synthesis guidance.",
+                        "Groq generation truncated before substantive content (finish_reason=length, reasoning_len=%d, content_repr=%r, chunks=%d). Returning honest synthesis guidance.",
                         len(reasoning_text),
+                        content,
                         final_chunks_count
                     )
                     answer = (
@@ -395,8 +437,9 @@ class GroqProvider(LLMProvider):
                     )
                 else:
                     logger.warning(
-                        "Groq response content is empty (finish_reason=%s, reasoning_tokens_present=%s). Returning grounded fallback.",
+                        "Groq response content is non-substantive or empty (finish_reason=%s, content_repr=%r, reasoning_tokens_present=%s). Returning grounded fallback.",
                         finish_reason,
+                        content,
                         bool(reasoning_text.strip())
                     )
                     answer = "I couldn't find enough information in this document to answer your question."
@@ -533,7 +576,7 @@ class GroqProvider(LLMProvider):
                     messages=minimal_messages,
                     model=self._model,
                     temperature=self._temperature,
-                    max_tokens=self._max_tokens,
+                    max_tokens=completion_reserve,
                     timeout=self._timeout
                 )
                 retry_comp = retry_response.parse()

@@ -642,7 +642,8 @@ class ChatService:
         fallback_phrases = [
             "i couldn't find enough information in this document",
             "i cannot find enough information in this document",
-            "not enough information in this document"
+            "not enough information in this document",
+            "synthesizing a substantial amount of information"
         ]
         is_fallback_answer = any(phrase in answer.lower() for phrase in fallback_phrases)
 
