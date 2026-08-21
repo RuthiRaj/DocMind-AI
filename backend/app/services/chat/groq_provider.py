@@ -377,12 +377,15 @@ class GroqProvider(LLMProvider):
             msg_obj = chat_completion.choices[0].message
             answer = msg_obj.content
             if not answer or not answer.strip():
-                # Extract reasoning fallback if model formatted output in reasoning block
-                reasoning = getattr(msg_obj, "reasoning", "")
-                if reasoning and reasoning.strip():
-                    answer = reasoning.strip()
-                else:
-                    answer = "I couldn't find enough information in the provided document to answer your question."
+                # Never return internal reasoning tokens to the user as final answer
+                finish_reason = getattr(chat_completion.choices[0], "finish_reason", "unknown")
+                reasoning_text = getattr(msg_obj, "reasoning", "") or ""
+                logger.warning(
+                    "Groq response content is empty (finish_reason=%s, reasoning_tokens_present=%s). Returning grounded fallback.",
+                    finish_reason,
+                    bool(reasoning_text.strip())
+                )
+                answer = "I couldn't find enough information in the provided document to answer your question."
 
             # Settle token window with actual usage if provided by Groq
             usage_obj = getattr(chat_completion, "usage", None)
