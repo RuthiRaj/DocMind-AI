@@ -5,6 +5,7 @@ Orchestrates retrieving document segments, validating pipeline completions,
 modular prompt compilation, querying abstract LLMs, and saving atomic analytics.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -16,10 +17,12 @@ from typing import Dict, List, Optional
 from fastapi import HTTPException, status
 
 from app.core.config import settings
+from app.core.rate_limit import groq_token_window
 from app.schemas.chat import ChatRequest, ChatResponse, SourceChunk
 from app.services.chat.provider import LLMProvider
 from app.services.chat.groq_provider import GroqProvider
 from app.services.chat.prompt_builder import PromptBuilder
+from app.services.chat.response_cache import response_cache
 from app.services.pdf.retrieval_service import RetrievalService
 
 logger = logging.getLogger(__name__)
@@ -182,13 +185,7 @@ class ChatService:
         Returns:
             tuple: (trimmed_history, trimmed_chunks, context, context_truncated)
         """
-        # Dynamically compute remaining available prompt token budget from rolling token window
-        from app.core.rate_limit import groq_token_window
-        current_used = groq_token_window.current_usage(window=60)
-        remaining_window = max(0, settings.GROQ_TPM_LIMIT - current_used)
-        completion_reserve = min(settings.LLM_MAX_TOKENS, settings.GROQ_COMPLETION_RESERVE_TOKENS)
-        available_headroom = max(settings.GROQ_PREFLIGHT_HEADROOM_FLOOR, remaining_window - completion_reserve)
-        budget = min(settings.GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET, available_headroom)
+        budget = settings.GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET
 
         payload_too_large_detail = (
             "Document context too large for the AI model — "
@@ -211,6 +208,7 @@ class ChatService:
             system_prompt, context, question, trimmed_history or None
         )
 
+        # Step 1: Trim conversation history first (turn-by-turn from oldest)
         while trimmed_history and self._estimate_groq_prompt_tokens(
             system_prompt, context, question, trimmed_history
         ) > budget:
@@ -219,17 +217,20 @@ class ChatService:
             else:
                 trimmed_history = trimmed_history[1:]
 
-        if trimmed_chunks is not None:
-            while trimmed_chunks and self._estimate_groq_prompt_tokens(
-                system_prompt, context, question, trimmed_history or None
-            ) > budget:
-                trimmed_chunks.pop()
-                context = PromptBuilder.compile_context(trimmed_chunks) if trimmed_chunks else ""
-        elif context:
-            while context and self._estimate_groq_prompt_tokens(
-                system_prompt, context, question, trimmed_history or None
-            ) > budget:
-                context = context[: max(0, int(len(context) * settings.CONTEXT_TRIM_DECAY_RATE))]
+        # Step 2: Only if history is completely empty and context chunks ALONE exceed the budget,
+        # trim lowest scoring chunks (preserving document retrieval quality as primary priority)
+        if not trimmed_history:
+            if trimmed_chunks is not None:
+                while trimmed_chunks and self._estimate_groq_prompt_tokens(
+                    system_prompt, context, question, None
+                ) > budget:
+                    trimmed_chunks.pop()
+                    context = PromptBuilder.compile_context(trimmed_chunks) if trimmed_chunks else ""
+            elif context:
+                while context and self._estimate_groq_prompt_tokens(
+                    system_prompt, context, question, None
+                ) > budget:
+                    context = context[: max(0, int(len(context) * settings.CONTEXT_TRIM_DECAY_RATE))]
 
         final_tokens = self._estimate_groq_prompt_tokens(
             system_prompt, context, question, trimmed_history or None
@@ -309,6 +310,68 @@ class ChatService:
         # 2. Validate Request Boundaries
         self._validate_request(request.question, request.top_k)
 
+        # 2.1 Check In-Memory Response Cache (Zero latency, Zero token cost)
+        if getattr(settings, "ENABLE_RESPONSE_CACHE", True):
+            cached_entry = response_cache.get(safe_doc_id, request.question)
+            if cached_entry:
+                overall_time_ms = int(round((time.perf_counter() - overall_start) * 1000))
+                cached_sources = [
+                    SourceChunk(**s) if isinstance(s, dict) else s
+                    for s in cached_entry.sources
+                ]
+                logger.info(
+                    "[RESPONSE] request_id=%s answer_generated=cached sources=%d processing_time_ms=%d",
+                    request_id,
+                    len(cached_sources),
+                    overall_time_ms,
+                )
+                return ChatResponse(
+                    success=True,
+                    document_id=safe_doc_id,
+                    request_id=request_id,
+                    question=request.question,
+                    answer=cached_entry.answer,
+                    provider=self.provider.provider_name(),
+                    model=self.provider.model_name(),
+                    processing_time_ms=overall_time_ms,
+                    retrieval_time_ms=0,
+                    generation_time_ms=0,
+                    sources=cached_sources,
+                    session_id=session_id,
+                    context_mode=cached_entry.context_mode,
+                    context_truncated=False,
+                )
+
+        # 2.2 Soft Concurrency Cap (Fast 200 graceful busy response if token window load >= 85%)
+        soft_cap_ratio = getattr(settings, "GROQ_SOFT_CAP_RATIO", 0.85)
+        used_tokens, effective_limit, current_ratio = groq_token_window.get_window_load(limit=settings.GROQ_TPM_LIMIT)
+        if current_ratio >= soft_cap_ratio:
+            overall_time_ms = int(round((time.perf_counter() - overall_start) * 1000))
+            logger.warning(
+                "[SOFT_CAP] request_id=%s token window load at %.1f%% (%d/%d tokens >= %.0f%%). Returning friendly busy message without queueing.",
+                request_id,
+                current_ratio * 100.0,
+                used_tokens,
+                effective_limit,
+                soft_cap_ratio * 100.0,
+            )
+            return ChatResponse(
+                success=True,
+                document_id=safe_doc_id,
+                request_id=request_id,
+                question=request.question,
+                answer=getattr(settings, "GROQ_BUSY_MESSAGE", "This demo is currently busy with other visitors — please try again in about a minute."),
+                provider=self.provider.provider_name(),
+                model=self.provider.model_name(),
+                processing_time_ms=overall_time_ms,
+                retrieval_time_ms=0,
+                generation_time_ms=0,
+                sources=[],
+                session_id=session_id,
+                context_mode="RAG",
+                context_truncated=False,
+            )
+
         # 3. Retrieve conversation history for this session
         from app.services.chat.conversation_store import conversation_store
         history = conversation_store.get_history(
@@ -328,11 +391,12 @@ class ChatService:
 
         # 4. Context Retrieval via RetrievalService
         retrieval_start = time.perf_counter()
+        effective_top_k = max(request.top_k, settings.INITIAL_RETRIEVAL_TOP_K)
         try:
             retrieved_chunks = self.retrieval_service.retrieve(
                 document_id=safe_doc_id,
                 query=request.question,
-                top_k=request.top_k,
+                top_k=effective_top_k,
                 request_id=request_id
             )
         except Exception as ret_err:
@@ -510,20 +574,47 @@ class ChatService:
             context_page_numbers
         )
 
-        # 8. Call LLM Provider with conversation history
+        # 8. Call LLM Provider with conversation history asynchronously in worker thread
         generation_start = time.perf_counter()
         try:
-            raw_answer, groq_truncated = self.provider.generate(
+            raw_answer, groq_truncated = await asyncio.to_thread(
+                self.provider.generate,
                 system_prompt=system_prompt,
                 context=compiled_context,
                 question=request.question,
                 history=history if history else None,
-                context_mode=context_mode
+                context_mode=context_mode,
+                request_id=request_id,
+                retrieved_chunks_count=len(retrieved_chunks),
+                final_chunks_count=len(cleaned_chunks),
+                session_id=request.session_id,
             )
             if groq_truncated:
                 context_truncated = True
         except Exception as gen_err:
             logger.exception("[LLM] request_id=%s LLM generation failed: %s", request_id, str(gen_err))
+            if isinstance(gen_err, HTTPException) and gen_err.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+                overall_time_ms = int(round((time.perf_counter() - overall_start) * 1000))
+                logger.warning(
+                    "[SOFT_CAP] request_id=%s Caught 429 rate limit during LLM generation. Returning friendly busy 200 response.",
+                    request_id
+                )
+                return ChatResponse(
+                    success=True,
+                    document_id=safe_doc_id,
+                    request_id=request_id,
+                    question=request.question,
+                    answer=getattr(settings, "GROQ_BUSY_MESSAGE", "This demo is currently busy with other visitors — please try again in about a minute."),
+                    provider=self.provider.provider_name(),
+                    model=self.provider.model_name(),
+                    processing_time_ms=overall_time_ms,
+                    retrieval_time_ms=retrieval_time_ms,
+                    generation_time_ms=int(round((time.perf_counter() - generation_start) * 1000)),
+                    sources=[],
+                    session_id=session_id,
+                    context_mode=context_mode,
+                    context_truncated=False,
+                )
             if isinstance(gen_err, HTTPException):
                 raise
             raise HTTPException(
@@ -635,6 +726,19 @@ class ChatService:
             fallback_used=(answer == fallback_msg),
             request_id=request_id
         )
+
+        # Store in Response Cache if enabled and not a busy/fallback response
+        if getattr(settings, "ENABLE_RESPONSE_CACHE", True) and answer != getattr(settings, "GROQ_BUSY_MESSAGE", "") and answer != fallback_msg:
+            try:
+                response_cache.put(
+                    document_id=safe_doc_id,
+                    question=request.question,
+                    answer=answer,
+                    sources=[s.dict() if hasattr(s, "dict") else s.model_dump() for s in sources],
+                    context_mode=context_mode,
+                )
+            except Exception as cache_err:
+                logger.warning("[CACHE_PUT] Failed to store response in cache: %s", str(cache_err))
 
         logger.info("[RESPONSE] request_id=%s answer_generated=true processing_time_ms=%d", request_id, overall_time_ms)
         return ChatResponse(

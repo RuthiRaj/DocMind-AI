@@ -8,7 +8,10 @@ and advanced error classification handling.
 
 import json
 import logging
+import math
+import re
 import threading
+import time
 from fastapi import HTTPException, status
 from groq import Groq
 
@@ -80,13 +83,7 @@ def _preflight_trim_messages(messages: list) -> tuple[list, bool]:
     Returns:
         tuple[list, bool]: Trimmed messages and whether any history/context was removed.
     """
-    # Dynamically compute remaining available prompt token budget from rolling token window
-    from app.core.rate_limit import groq_token_window
-    current_used = groq_token_window.current_usage(window=60)
-    remaining_window = max(0, settings.GROQ_TPM_LIMIT - current_used)
-    completion_reserve = min(settings.LLM_MAX_TOKENS, settings.GROQ_COMPLETION_RESERVE_TOKENS)
-    available_headroom = max(settings.GROQ_PREFLIGHT_HEADROOM_FLOOR, remaining_window - completion_reserve)
-    budget = min(settings.GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET, available_headroom)
+    budget = settings.GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET
     working = list(messages)
     truncated = False
     original_tokens = _estimate_messages_tokens(messages)
@@ -163,18 +160,21 @@ class GroqProvider(LLMProvider):
                         import os
                         api_key = os.environ.get("GROQ_API_KEY")
                     
-                    if not api_key or not api_key.strip():
-                        detail_msg = "GROQ_API_KEY environment variable is not configured on the backend server."
+                    if not api_key or not api_key.strip() or api_key.strip() == "your_groq_api_key_here":
+                        detail_msg = (
+                            "GROQ_API_KEY is not configured. Please copy backend/.env.example to "
+                            "backend/.env and set your active Groq API key from https://console.groq.com/keys"
+                        )
                         logger.error("Configuration failure: %s", detail_msg)
                         raise HTTPException(
                             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                             detail=detail_msg
                         )
 
-                    logger.info("Initializing Groq API client singleton...")
+                    logger.info("Initializing Groq API client singleton with max_retries=0...")
                     try:
-                        # Instantiate Groq client
-                        GroqProvider._client_instance = Groq(api_key=api_key)
+                        # Instantiate Groq client with max_retries=0 for immediate app-level arbitration
+                        GroqProvider._client_instance = Groq(api_key=api_key, max_retries=0)
                     except Exception as err:
                         logger.exception("Failed to initialize Groq client: %s", str(err))
                         raise RuntimeError(f"Client initialization failed: {str(err)}")
@@ -191,7 +191,11 @@ class GroqProvider(LLMProvider):
         context: str,
         question: str,
         history: list | None = None,
-        context_mode: str = "RAG"
+        context_mode: str = "RAG",
+        request_id: str | None = None,
+        retrieved_chunks_count: int = 0,
+        final_chunks_count: int = 0,
+        **kwargs
     ) -> tuple[str, bool]:
         """
         Invokes completions endpoint.
@@ -200,6 +204,11 @@ class GroqProvider(LLMProvider):
             system_prompt (str): Core grounding prompt.
             context (str): Joint chunks text.
             question (str): User question.
+            history (list | None): Conversation turns.
+            context_mode (str): Mode label ("RAG" or "FULL_CONTEXT").
+            request_id (str | None): Correlated request ID.
+            retrieved_chunks_count (int): Initial retrieved candidates.
+            final_chunks_count (int): Final surviving context chunks.
 
         Returns:
             tuple[str, bool]: Grounded answer and whether preflight trimming occurred.
@@ -248,12 +257,16 @@ class GroqProvider(LLMProvider):
             serialized_payload_bytes,
         )
 
-        completion_reserve = min(self._max_tokens, 256)
+        session_tag = kwargs.get("session_id") or (request_id[:8] if request_id else "N/A")
+
+        # Pessimistic worst-case completion reserve based on full configured max_tokens cap
+        completion_reserve = self._max_tokens
         request_tokens = estimated_prompt_tokens + completion_reserve
         reserve_res = groq_token_window.reserve(
             tokens=request_tokens,
             limit=settings.GROQ_TPM_LIMIT,
-            window=60
+            window=60,
+            session_id=session_tag,
         )
         if isinstance(reserve_res, tuple) and len(reserve_res) == 3:
             allowed, retry_after, res_id = reserve_res
@@ -261,19 +274,88 @@ class GroqProvider(LLMProvider):
             allowed, retry_after = reserve_res[0], reserve_res[1]
             res_id = ""
 
+        # Application-Level In-Memory Queue: Hold connection and retry until headroom frees up or max wait ceiling is reached
+        max_queue_wait = getattr(settings, "GROQ_MAX_QUEUE_WAIT_SECONDS", 25.0)
+        queue_start_time = time.perf_counter()
+        queued = False
+
+        while not allowed:
+            elapsed = time.perf_counter() - queue_start_time
+            if elapsed >= max_queue_wait:
+                break
+                
+            queued = True
+            # Sleep in responsive increments (max 1.5s per check to immediately catch in-flight settlements)
+            wait_slice = min(1.5, max(0.5, float(retry_after)), max(0.1, max_queue_wait - elapsed))
+            logger.info(
+                "[APP_QUEUE_WAIT] session=%s request_id=%s waiting %.1fs for token window headroom (elapsed=%.1fs/%.1fs, retry_after=%ds)",
+                session_tag,
+                request_id[:8] if request_id else "N/A",
+                wait_slice,
+                elapsed,
+                max_queue_wait,
+                retry_after,
+            )
+            time.sleep(wait_slice)
+
+            # Re-attempt reservation
+            reserve_res = groq_token_window.reserve(
+                tokens=request_tokens,
+                limit=settings.GROQ_TPM_LIMIT,
+                window=60,
+                session_id=session_tag,
+            )
+            if isinstance(reserve_res, tuple) and len(reserve_res) == 3:
+                allowed, retry_after, res_id = reserve_res
+            else:
+                allowed, retry_after = reserve_res[0], reserve_res[1]
+                res_id = ""
+
+            # If still rejected and history is present, attempt shedding history to fit within window
+            if not allowed and history and len(messages) > 2:
+                minimal_messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"DOCUMENT CONTEXT:\n{context}\n\nUSER QUESTION: {question}"}
+                ]
+                min_chars = sum(len(m.get("content", "")) for m in minimal_messages)
+                min_tokens = (min_chars + settings.TOKEN_ESTIMATION_RATIO - 1) // settings.TOKEN_ESTIMATION_RATIO + completion_reserve
+                min_reserve = groq_token_window.reserve(
+                    tokens=min_tokens,
+                    limit=settings.GROQ_TPM_LIMIT,
+                    window=60,
+                    session_id=session_tag,
+                )
+                if min_reserve[0]:
+                    logger.info(
+                        "[RATE_LIMIT] Shedding %d history messages to fit queued request into token window (%d -> %d tokens)",
+                        len(messages) - 2,
+                        request_tokens,
+                        min_tokens
+                    )
+                    messages = minimal_messages
+                    preflight_truncated = True
+                    allowed, retry_after, res_id = min_reserve
+                    request_tokens = min_tokens
+                    break
+
+        if queued and allowed:
+            total_waited = time.perf_counter() - queue_start_time
+            logger.info("[APP_QUEUE_GRANTED] session=%s reservation granted after waiting %.2fs in queue.", session_tag, total_waited)
+
         if not allowed:
+            total_waited = time.perf_counter() - queue_start_time
             logger.warning(
-                "[RATE_LIMIT] Groq token window rejected request: requested=%d retry_after=%ds",
+                "[RATE_LIMIT] Groq token window queue timeout (waited %.1fs): requested=%d retry_after=%ds",
+                total_waited,
                 request_tokens,
                 retry_after,
             )
 
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"The AI service token limit is temporarily exhausted. Please try again in {retry_after} seconds.",
+                detail=f"The AI service rate limit was exceeded. The request was queued for {int(total_waited)}s but could not be processed. Please wait {retry_after} seconds before trying again.",
                 headers={"Retry-After": str(retry_after)},
             )
-
 
         logger.info("Submitting query request to Groq (%s) with timeout=%ds...", self._model, self._timeout)
         
@@ -292,9 +374,15 @@ class GroqProvider(LLMProvider):
             if not chat_completion.choices or len(chat_completion.choices) == 0:
                 raise ValueError("Groq returned completion response containing zero choices.")
 
-            answer = chat_completion.choices[0].message.content
-            if not answer:
-                raise ValueError("Groq returned empty text content in completion message.")
+            msg_obj = chat_completion.choices[0].message
+            answer = msg_obj.content
+            if not answer or not answer.strip():
+                # Extract reasoning fallback if model formatted output in reasoning block
+                reasoning = getattr(msg_obj, "reasoning", "")
+                if reasoning and reasoning.strip():
+                    answer = reasoning.strip()
+                else:
+                    answer = "I couldn't find enough information in the provided document to answer your question."
 
             # Settle token window with actual usage if provided by Groq
             usage_obj = getattr(chat_completion, "usage", None)
@@ -304,10 +392,10 @@ class GroqProvider(LLMProvider):
 
             if isinstance(actual_total_tokens, (int, float)) and actual_total_tokens > 0:
                 total_tokens = int(actual_total_tokens)
-                groq_token_window.settle(res_id, actual_tokens=total_tokens)
             else:
                 total_tokens = prompt_tokens + completion_tokens
-                groq_token_window.settle(res_id, actual_tokens=total_tokens)
+
+            groq_token_window.settle(res_id, actual_tokens=total_tokens, session_id=session_tag)
 
             # Extract rate limit quota headers from Groq response
             rl_headers = {
@@ -319,6 +407,22 @@ class GroqProvider(LLMProvider):
                 "reset_requests": headers.get("x-ratelimit-reset-requests"),
             }
 
+            # Parse provider telemetry numbers for window synchronization
+            try:
+                p_limit = int(rl_headers["limit_tokens"]) if rl_headers.get("limit_tokens") and rl_headers["limit_tokens"].isdigit() else None
+                p_rem = int(rl_headers["remaining_tokens"]) if rl_headers.get("remaining_tokens") and rl_headers["remaining_tokens"].isdigit() else None
+                p_reset = None
+                raw_reset = rl_headers.get("reset_tokens")
+                if raw_reset:
+                    raw_reset = raw_reset.strip().lower()
+                    if raw_reset.endswith("ms"):
+                        p_reset = float(raw_reset[:-2]) / 1000.0
+                    elif raw_reset.endswith("s"):
+                        p_reset = float(raw_reset[:-1])
+                groq_token_window.update_provider_telemetry(limit=p_limit, remaining=p_rem, reset_seconds=p_reset)
+            except Exception:
+                pass
+
             from app.core.telemetry import groq_telemetry
             groq_telemetry.record_call(
                 call_type="chat_completion",
@@ -328,6 +432,23 @@ class GroqProvider(LLMProvider):
                 ratelimit_headers=rl_headers,
                 query=question,
                 extra={"context_mode": context_mode, "model": self._model}
+            )
+
+            # Structured Diagnostic Metrics Log Entry
+            logger.info(
+                "[LLM_METRICS] request_id=%s llm_calls_in_request=1 retrieved_chunks=%d final_context_chunks=%d "
+                "context_chars=%d estimated_prompt_tokens=%d completion_tokens=%d total_tokens=%d model=%s "
+                "upstream_status=200 remaining_tokens=%s reset_tokens=%s",
+                request_id or "N/A",
+                retrieved_chunks_count,
+                final_chunks_count or len(context.split("--- Chunk ")),
+                len(context),
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                self._model,
+                rl_headers.get("remaining_tokens") or "N/A",
+                rl_headers.get("reset_tokens") or "N/A",
             )
 
             logger.info(
@@ -361,9 +482,63 @@ class GroqProvider(LLMProvider):
         except RateLimitError as err:
             groq_token_window.settle(res_id, actual_tokens=0)
             logger.warning("[RATE_LIMIT] Groq provider-side rate limit exceeded: %s", str(err))
+
+            # Parse retry-after from headers or error message
+            err_headers = getattr(err, "response", None)
+            retry_after_val = 2
+            if err_headers and hasattr(err_headers, "headers"):
+                ra = err_headers.headers.get("retry-after")
+                if ra and ra.isdigit():
+                    retry_after_val = int(ra)
+
+            m = re.search(r"try again in ([\d\.]+)s", str(err), re.IGNORECASE)
+            if m:
+                try:
+                    retry_after_val = max(1, int(math.ceil(float(m.group(1)))))
+                except Exception:
+                    pass
+
+            # If upstream retry_after is small (<= 2.0s), attempt a quick retry after shedding history
+            if retry_after_val <= 2:
+                sleep_duration = max(1.0, float(retry_after_val))
+                logger.info(
+                    "[RATE_LIMIT] 429 received from Groq. Quick retry with history dropped (waiting %.1fs)...",
+                    sleep_duration
+                )
+                time.sleep(sleep_duration)
+
+            try:
+                minimal_messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"DOCUMENT CONTEXT:\n{context}\n\nUSER QUESTION: {question}"}
+                ]
+                retry_response = client.chat.completions.with_raw_response.create(
+                    messages=minimal_messages,
+                    model=self._model,
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                    timeout=self._timeout
+                )
+                retry_comp = retry_response.parse()
+                if retry_comp.choices and len(retry_comp.choices) > 0:
+                    retry_ans = retry_comp.choices[0].message.content
+                    if retry_ans:
+                        retry_headers = dict(retry_response.headers)
+                        u_obj = getattr(retry_comp, "usage", None)
+                        p_toks = int(getattr(u_obj, "prompt_tokens", 0)) if u_obj else 0
+                        c_toks = int(getattr(u_obj, "completion_tokens", 0)) if u_obj else (len(retry_ans) // 4)
+                        t_toks = getattr(u_obj, "total_tokens", None) or (p_toks + c_toks)
+                        groq_token_window.settle(res_id, actual_tokens=int(t_toks))
+
+                        logger.info("[RATE_LIMIT] Auto-retry succeeded cleanly.")
+                        return retry_ans, True
+            except Exception as retry_err:
+                logger.warning("[RATE_LIMIT] Auto-retry failed: %s", str(retry_err))
+
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="The AI service rate limit was exceeded. Please try again shortly."
+                detail=f"The AI service rate limit was exceeded. Please wait {retry_after_val} seconds before trying again.",
+                headers={"Retry-After": str(retry_after_val)}
             )
         except APIConnectionError as err:
             groq_token_window.settle(res_id, actual_tokens=0)
@@ -390,9 +565,28 @@ class GroqProvider(LLMProvider):
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                     detail=PAYLOAD_TOO_LARGE_DETAIL,
                 )
+            
+            # Extract detailed error message from provider response body if present
+            err_detail = ""
+            if isinstance(response_body, dict) and "error" in response_body:
+                err_detail = response_body["error"].get("message", "")
+
+            if err.status_code == 404:
+                detail_msg = f"AI model '{self._model}' was not found: {err_detail}" if err_detail else f"Configured AI model '{self._model}' was not found by the AI provider (404)."
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=detail_msg,
+                )
+            elif err.status_code in (401, 403):
+                detail_msg = f"AI provider authentication error ({err.status_code}): {err_detail}" if err_detail else f"AI provider authentication failed ({err.status_code})."
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=detail_msg,
+                )
+
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"External AI service returned an error status: {err.status_code}."
+                detail=f"External AI service error ({err.status_code}): {err_detail or str(err)}"
             )
         except Exception as exc:
             groq_token_window.settle(res_id, actual_tokens=0)

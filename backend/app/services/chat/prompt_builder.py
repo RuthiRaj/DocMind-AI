@@ -62,10 +62,7 @@ class PromptBuilder:
             chunk_str = f"{chunk_index} to {last_chunk_index}" if last_chunk_index is not None else f"{chunk_index}"
             
             segment_info = (
-                f"[Document Segment {i}]\n"
-                f"Page: {page_str}\n"
-                f"Chunk: {chunk_str}\n"
-                f"Content:\n"
+                f"[Document Content (Pages {page_str})]\n"
                 f"{clean_chunk_text}"
             )
             compiled.append(segment_info)

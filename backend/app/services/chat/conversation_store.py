@@ -36,7 +36,7 @@ class ConversationStore:
             self._store[key].append({"role": "assistant", "content": answer})
             logger.debug(f"Added turn to conversation store for {key}")
 
-    def get_history(self, document_id: str, session_id: str, max_turns: int = 10, max_tokens: int = 4000) -> List[Dict[str, str]]:
+    def get_history(self, document_id: str, session_id: str, max_turns: int = 2, max_tokens: int = 350) -> List[Dict[str, str]]:
         """
         Returns the last N conversation turns in chronological order (oldest first),
         truncated by token count (estimate 4 chars = 1 token).
@@ -44,8 +44,8 @@ class ConversationStore:
         Args:
             document_id (str): The ID of the document.
             session_id (str): The ID of the session.
-            max_turns (int, optional): Maximum number of turns to return. Defaults to 10.
-            max_tokens (int, optional): Maximum tokens to include. Defaults to 4000.
+            max_turns (int, optional): Maximum number of turns to return. Defaults to 2.
+            max_tokens (int, optional): Maximum tokens to include. Defaults to 350.
 
         Returns:
             List[Dict[str, str]]: Conversation history messages in chronological order.

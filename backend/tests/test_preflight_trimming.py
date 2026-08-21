@@ -81,7 +81,7 @@ class TestChatServicePreflightTrim:
         history = _make_history(8)
         chunks = _make_chunks(
             count=8,
-            chars_each=max(500, settings.FULL_CONTEXT_MAX_CHARS // 8),
+            chars_each=max(500, 10000 // 8),
         )
 
         trimmed_history, trimmed_chunks, compiled_context, context_truncated = (
@@ -135,7 +135,7 @@ class TestChatServicePreflightTrim:
         assert len(trimmed_chunks) < len(chunks)
         remaining_scores = [chunk.score for chunk in trimmed_chunks]
         dropped_scores = sorted({chunk.score for chunk in chunks} - set(remaining_scores))
-        if dropped_scores:
+        if dropped_scores and remaining_scores:
             assert min(remaining_scores) > min(dropped_scores)
 
     def test_user_question_is_never_trimmed(
@@ -203,7 +203,7 @@ class TestGroqProviderPreflightTrim:
         system_prompt = PromptBuilder.get_system_prompt()
         question = "What changed between section 2 and section 4?"
         history = _make_history(9)
-        context = "D" * settings.FULL_CONTEXT_MAX_CHARS
+        context = "D" * 10000
 
         messages = _build_groq_messages(system_prompt, history, context, question)
         trimmed_messages, truncated = _preflight_trim_messages(messages)
@@ -239,11 +239,15 @@ class TestGroqProviderPreflightTrim:
         mock_client = MagicMock()
         mock_completion = MagicMock()
         mock_completion.choices = [MagicMock(message=MagicMock(content="Answer"))]
-        mock_client.chat.completions.create.return_value = mock_completion
+        mock_completion.usage = MagicMock(prompt_tokens=10, completion_tokens=10, total_tokens=20)
+        mock_raw = MagicMock()
+        mock_raw.parse.return_value = mock_completion
+        mock_raw.headers = {}
+        mock_client.chat.completions.with_raw_response.create.return_value = mock_raw
         monkeypatch.setattr(GroqProvider, "_client_instance", mock_client)
         monkeypatch.setattr(
             "app.services.chat.groq_provider.groq_token_window.reserve",
-            lambda **kwargs: (True, 0),
+            lambda **kwargs: (True, 0, "res-123"),
         )
 
         provider = GroqProvider()
@@ -252,7 +256,7 @@ class TestGroqProviderPreflightTrim:
 
         _, first_truncated = provider.generate(
             system_prompt=system_prompt,
-            context="X" * settings.FULL_CONTEXT_MAX_CHARS,
+            context="X" * 10000,
             question=question,
             history=_make_history(9),
         )

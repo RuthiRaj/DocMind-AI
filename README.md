@@ -1,246 +1,123 @@
-# DocMind AI 🧠
+# DocMind AI
 
-**DocMind AI** is a production-grade, grounded **Retrieval-Augmented Generation (RAG)** platform designed for enterprise PDF document analysis, multi-hop synthesis, and interactive chat.
+> **Ask questions, get grounded answers with page citations — not guesses.**
 
-Built with a fast **FastAPI** Python backend, zero-dependency **BM25 + FAISS** hybrid retrieval engine, and a modern **Next.js 16 / React 19** frontend dashboard.
+DocMind AI is a full-stack Retrieval-Augmented Generation (RAG) application that lets you upload a PDF and ask natural-language questions about it. Every answer is grounded in the actual document content and cited back to the exact page it came from — no hallucinated facts, no ungrounded guessing.
 
----
-
-## ✨ Key Features & RAG V2 Highlights
-
-* 🔍 **Hybrid Retrieval Engine (BM25 + Vector Search + RRF):** Combines lexical term density (BM25 Okapi) with dense vector embeddings (`BAAI/bge-small-en-v1.5`) using Reciprocal Rank Fusion ($K=60$).
-* 📍 **1:1 Grounded Page Citations:** PyMuPDF text cleaning ensures precise page-level grounding and zero character offset drift across document pages.
-* ⚡ **Selective Query Expansion:** Smart heuristic filtering skips unnecessary LLM query expansion calls on short queries or technical codes, saving tokens and eliminating Groq rate-limit spikes (`HTTP 429`).
-* 💬 **Multi-Turn Session Memory:** Supports conversational context tracking across multi-turn follow-up questions.
-* 🛡️ **Failure-Path Robustness:** Built-in safeguards reject corrupt PDFs, empty documents, missing index files, and provider timeouts (`HTTP 504`) with clean, descriptive error responses.
-* ⚡ **Lazy Auto-Upgrade:** Automatically upgrades legacy V1 document indexes to V2 on-the-fly during user queries.
+Built as a production-style backend: hybrid retrieval (dense + lexical search), token-budget-aware LLM orchestration, thread-safe rate limiting, response caching, and graceful degradation under load — not just a weekend prototype.
 
 ---
 
-## 🏗️ Architecture
+<p align="center">
+  <img src="docs/assets/chat_preview.png" alt="DocMind AI Chat Interface with Citations" width="850">
+</p>
+
+---
+
+## ✨ Features
+
+- **PDF Ingestion & Smart Chunking** — PyMuPDF extraction with paragraph-aware chunk boundaries and page metadata preserved throughout the pipeline.
+- **Hybrid Retrieval** — Combines dense vector search (FAISS + `BAAI/bge-small-en-v1.5` embeddings) with lexical BM25 keyword search, merged via Reciprocal Rank Fusion (RRF).
+- **Grounded, Cited Answers** — Every response traces back to the exact source page(s) it was generated from, shown as interactive citation badges in the UI.
+- **Bounded Multi-Turn Chat** — Conversation history is capped (2 turns / 350 tokens) so multi-turn sessions never silently blow past API rate limits.
+- **Response Caching** — Repeated or near-identical questions are served from an in-memory LRU cache in under 5ms, with zero additional API cost.
+- **Graceful Load Handling** — Under heavy concurrent traffic, the app returns a fast, friendly "busy" message instead of hanging or throwing raw errors.
+- **Fully Async Backend** — LLM calls are offloaded to a thread pool so the API event loop never blocks under load.
+
+---
+
+## 🏗️ How It Works
 
 ```
-                          +-------------------------+
-                          |   User Question Input   |
-                          +------------+------------+
-                                       |
-                                       v
-                     +-----------------------------------+
-                     | Selective Query Rewriting Filter  |
-                     |  - Skip if <= 4 words             |
-                     |  - Skip if technical code/ID      |
-                     +-----------------+-----------------+
-                                       |
-                   +-------------------+-------------------+
-                   |                                       |
-                   v                                       v
-     +---------------------------+           +---------------------------+
-     |   BM25 Okapi Keyword      |           | Sentence-Transformers     |
-     |   Retriever (Term Density)|           | BAAI/bge-small-en-v1.5    |
-     +-------------+-------------+           +-------------+-------------+
-                   |                                       |
-                   +-------------------+-------------------+
-                                       |
-                                       v
-                     +-----------------------------------+
-                     |  Reciprocal Rank Fusion (RRF)     |
-                     |  Score = 1/(60 + r_vec) + ...     |
-                     +-----------------+-----------------+
-                                       |
-                                       v
-                     +-----------------------------------+
-                     |  Neighbor-Chunk Merging & Cap     |
-                     |  - Max 2 adjacent chunks          |
-                     |  - Max 1,500 characters cap       |
-                     +-----------------+-----------------+
-                                       |
-                                       v
-                     +-----------------------------------+
-                     |  Grounded Prompt Builder & LLM    |
-                     |  - Groq llama-3.1-8b-instant      |
-                     |  - Factual synonym matching rules |
-                     +-----------------+-----------------+
-                                       |
-                                       v
-                     +-----------------------------------+
-                     |  Response & Grounded Citations    |
-                     +-----------------------------------+
+┌─────────────────────────────────────────────────────────┐
+│                   Frontend (Next.js)                    │
+│        Upload → Dashboard → Chat UI with citations      │
+└─────────────────────────────────────────────────────────┘
+                            │
+                   POST /chat/{doc_id}
+                            ▼
+┌─────────────────────────────────────────────────────────┐
+│                    FastAPI Backend                      │
+│                                                         │
+│ 1. Check response cache → instant hit? return in <5ms   │
+│ 2. Check token headroom → near limit? friendly busy msg │
+│ 3. Hybrid retrieval → FAISS (dense) + BM25 (lexical)    │
+│    merged via Reciprocal Rank Fusion (RRF)              │
+│ 4. Assemble prompt within token budget (history + chunks│
+│ 5. Call LLM (openai/gpt-oss-20b via Groq) in a worker   │
+│    thread — event loop stays responsive                 │
+│ 6. Return grounded answer with page-level citations     │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 📁 Project Structure
+## 🧱 Tech Stack
 
-```text
-DocMind AI/
-├── .gitignore
-├── LICENSE
-├── README.md
-├── backend/
-│   ├── .env.example
-│   ├── .gitignore
-│   ├── pytest.ini
-│   ├── requirements.txt
-│   ├── app/
-│   │   ├── main.py
-│   │   ├── api/
-│   │   ├── core/
-│   │   ├── schemas/
-│   │   ├── services/
-│   │   └── utils/
-│   ├── scripts/
-│   │   ├── migrate_v2_documents.py
-│   │   ├── run_adversarial_audit.py
-│   │   └── verify_live_api_execution.py
-│   ├── tests/
-│   │   ├── conftest.py
-│   │   ├── test_preflight_trimming.py
-│   │   └── test_rag_architecture_integration.py
-│   └── vector_store/
-│       └── .gitkeep
-└── frontend/
-    ├── .env.local.example
-    ├── .gitignore
-    ├── next.config.ts
-    ├── package.json
-    ├── tsconfig.json
-    ├── app/
-    ├── components/
-    ├── constants/
-    ├── hooks/
-    ├── lib/
-    ├── providers/
-    ├── services/
-    └── types/
-```
+- **Backend**: Python 3.12+, FastAPI, PyMuPDF, Sentence-Transformers, FAISS, BM25, Groq SDK, Pydantic
+- **Frontend**: Next.js 16 (App Router), React 19, TanStack Query, Tailwind CSS, React-Markdown
 
 ---
 
-## 🛠️ Tech Stack
+## 🚀 Quick Start
 
-### Backend
-* **Language & Framework:** Python 3.12+, FastAPI, Uvicorn
-* **PDF Inspection & Processing:** PyMuPDF (`fitz`)
-* **Embeddings & Vector Store:** `BAAI/bge-small-en-v1.5`, FAISS (`faiss-cpu`)
-* **Retrieval Engine:** Zero-dependency BM25 Okapi + FAISS Reciprocal Rank Fusion
-* **LLM Provider:** Groq SDK (`llama-3.1-8b-instant`)
-
-### Frontend
-* **Framework:** Next.js 16 (App Router), React 19, TypeScript
-* **Styling:** Tailwind CSS, Framer Motion, Lucide Icons
-* **Data Fetching & State:** React Query (`@tanstack/react-query`), Axios
-
----
-
-## 🚀 Installation & Setup
-
-### 1. Prerequisites
-* Python 3.12+ installed
-* Node.js 18+ and npm installed
-* A free [Groq API Key](https://console.groq.com/)
-
----
-
-### 2. Backend Setup
+### 1. Clone the repo
 
 ```bash
-# Navigate to backend directory
+git clone https://github.com/Ruthiraj-Gosula/DocMind-AI.git
+cd DocMind-AI
+```
+
+### 2. Get a free Groq API key
+
+Sign up at [console.groq.com/keys](https://console.groq.com/keys) — it's free, no credit card required.
+
+### 3. Set up the backend
+
+```bash
 cd backend
-
-# Create and activate virtual environment
-# Windows (PowerShell):
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-
-# Linux / macOS:
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# Configure environment variables
-# Copy template to .env
 cp .env.example .env
 ```
 
-Open `backend/.env` and insert your Groq API key:
-```env
-GROQ_API_KEY=gsk_your_groq_api_key_here
+Open `.env` and paste your Groq API key into `GROQ_API_KEY=`.
+
+```bash
+pip install -r requirements.txt
+uvicorn app.main:app --reload
 ```
 
-Start the backend dev server:
+Backend runs at `http://127.0.0.1:8000`. Interactive API docs at `http://127.0.0.1:8000/docs`.
+
+### 4. Set up the frontend
+
 ```bash
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-Verify backend health by navigating to `http://127.0.0.1:8000/docs`.
-
----
-
-### 3. Frontend Setup
-
-Open a new terminal window:
-```bash
-# Navigate to frontend directory
-cd frontend
-
-# Install dependencies
+cd ../frontend
+cp .env.example .env.local
 npm install
-
-# Configure environment variables
-cp .env.local.example .env.local
-
-# Start frontend development server
 npm run dev
 ```
-Open `http://localhost:3000` in your browser.
+
+Frontend runs at `http://localhost:3000`.
+
+### 5. Try it out
+
+1. Open `http://localhost:3000` in your browser.
+2. Upload a PDF, wait for it to finish processing, and start asking questions!
 
 ---
 
-### 4. Running Tests
+## ⚠️ Known Limitations
 
-Execute the automated pytest regression suite:
-```bash
-cd backend
-python -m pytest tests/ -v
-```
+This project runs on Groq's free developer tier, which comfortably supports a handful of concurrent users:
 
----
-
-## 🌐 API Endpoints Overview
-
-| Method | Endpoint | Purpose |
-|---|---|---|
-| `GET` | `/health` | Backend health check |
-| `POST` | `/upload` | Upload a PDF document |
-| `POST` | `/process/{document_id}` | Extract/process document text |
-| `POST` | `/chunk/{document_id}` | Create document chunks |
-| `POST` | `/embed/{document_id}` | Generate embeddings |
-| `POST` | `/index/{document_id}` | Create/update FAISS index |
-| `POST` | `/retrieve/{document_id}` | Retrieve relevant chunks |
-| `GET` | `/retrieve/{document_id}/debug` | Retrieval/debug telemetry |
-| `POST` | `/chat/{document_id}` | Grounded RAG chat |
-| `GET` | `/documents` | List documents |
-| `GET` | `/documents/statistics` | Document statistics |
-| `GET` | `/documents/{document_id}` | Get document details |
-| `GET` | `/documents/{document_id}/status` | Get document pipeline status |
-| `DELETE` | `/documents/{document_id}` | Delete a document |
-| `POST` | `/maintenance/cleanup` | Clean disposable runtime data |
+- **Free-Tier Capacity**: Comfortably handles up to ~5 concurrent active users before a soft concurrency cap kicks in.
+- **Graceful Busy Notice**: If the demo is under heavy load, you may see a friendly *"currently busy"* message instead of an answer — this is expected behavior, not a bug. Just try again in a moment.
+- **Single-Document Scope**: Each chat session is scoped to a single document — cross-document search isn't currently supported.
+- **In-Memory State**: Rate limiting and response caching are in-memory per process; a multi-instance production deployment would want to back these with Redis.
+- **Self-Contained Usage**: Since you run this with your own free Groq API key, your personal usage isn't affected by anyone else's traffic.
 
 ---
 
-## 📊 Evaluation & Robustness Benchmarks
+## 📄 License
 
-DocMind AI RAG V2 was benchmarked across multi-page technical documents:
-
-* **Unanswerable Refusal Precision:** **100% (4/4)** strict refusal rate on unanswerable questions without context leakage.
-* **Multi-Hop Synthesis Rate:** **100% (4/4)** accurate synthesis across facts separated by up to 11 pages.
-* **Cross-Document Generalization:** **100% (2/2)** accurate grounding across distinct HR and Financial policy PDFs.
-* **Error Resilience:** Clean `HTTPException` responses for corrupt PDF files (`400`), empty text documents (`400`), missing indexes (`400`), and provider timeouts (`504`).
-
----
-
-## 📜 License
-
-This project is licensed under the MIT License.
+MIT — see [LICENSE](LICENSE) for details.

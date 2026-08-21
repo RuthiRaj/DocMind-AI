@@ -113,7 +113,7 @@ class ChatResponse(BaseModel):
     model: str = Field(
         ...,
         description="Active LLM model name",
-        examples=["llama-3.1-8b-instant"]
+        examples=["openai/gpt-oss-20b"]
     )
     retrieval_version: str = Field(
         default=settings.RETRIEVAL_VERSION,

@@ -40,6 +40,13 @@ async def lifespan(fastapi_app: FastAPI):
         provider.initialize_model()
         elapsed = time.perf_counter() - start_time
         logger.info("Embedding model loaded successfully. Initialization completed in %.2f seconds.", elapsed)
+        
+        # Validate GROQ_API_KEY configuration
+        if not settings.GROQ_API_KEY or settings.GROQ_API_KEY.strip() in ("", "your_groq_api_key_here"):
+            logger.warning(
+                "GROQ_API_KEY is not configured. AI Chat queries will require an active key. "
+                "See backend/.env.example and obtain a free key at https://console.groq.com/keys"
+            )
     except Exception as exc:
         logger.critical("CRITICAL: Failed to load embedding model on startup: %s", str(exc), exc_info=True)
         # Fail startup cleanly by exiting the process

@@ -20,7 +20,11 @@ class LLMProvider(ABC):
         context: str,
         question: str,
         history: list | None = None,
-        context_mode: str = "RAG"
+        context_mode: str = "RAG",
+        request_id: str | None = None,
+        retrieved_chunks_count: int = 0,
+        final_chunks_count: int = 0,
+        **kwargs
     ) -> tuple[str, bool]:
         """
         Submits system context and query variables to the LLM backend for completions.

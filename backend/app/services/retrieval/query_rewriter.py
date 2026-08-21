@@ -26,8 +26,8 @@ def should_rewrite(query: str) -> Tuple[bool, str]:
     """
     Evaluates whether a query requires LLM query expansion based on heuristics.
     """
-    if not getattr(settings, "ENABLE_SELECTIVE_QUERY_REWRITING", True):
-        return True, "Selective query rewriting disabled in config."
+    if not getattr(settings, "ENABLE_SELECTIVE_QUERY_REWRITING", False):
+        return False, "Selective query rewriting disabled in config."
 
     words = query.strip().split()
     min_words = getattr(settings, "REWRITE_MIN_WORD_COUNT", 5)
@@ -49,6 +49,10 @@ def rewrite_query(original_query: str) -> List[str]:
     """
     queries = [original_query]
 
+    # If query rewriting is globally disabled, return immediately with zero overhead
+    if not getattr(settings, "ENABLE_SELECTIVE_QUERY_REWRITING", False):
+        return queries
+
     # Evaluate selective query rewriting heuristic filter
     qualified, reason = should_rewrite(original_query)
     if not qualified:
@@ -56,9 +60,10 @@ def rewrite_query(original_query: str) -> List[str]:
         return queries
 
     try:
-        # Check if Groq token window has sufficient headroom for query expansion
+        # Check if Groq token window has sufficient headroom for query expansion without starving main completions
         current_tokens = groq_token_window.current_usage(window=60)
-        if current_tokens > (settings.GROQ_TPM_LIMIT - 2500):
+        safety_headroom = 6000  # Preserve at least 6,000 tokens for chat completion answer generation
+        if current_tokens > (settings.GROQ_TPM_LIMIT - safety_headroom):
             logger.info(
                 "Query rewriter skipped to prioritize Groq TPM quota for chat completions (usage=%d/%d).",
                 current_tokens,

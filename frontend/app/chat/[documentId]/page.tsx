@@ -27,7 +27,9 @@ import {
   Trash2,
   Compass,
   AlertCircle,
-  PlayCircle
+  PlayCircle,
+  Info,
+  Clock
 } from 'lucide-react';
 
 interface ChatPageProps {
@@ -201,6 +203,7 @@ export default function ChatPage({ params }: ChatPageProps) {
               <div className="space-y-6">
                 {messages.map((m) => {
                   const isAssistant = m.sender === 'assistant';
+                  const isBusyMessage = isAssistant && m.text.includes('busy with other visitors');
                   return (
                     <div
                       key={m.id}
@@ -210,8 +213,10 @@ export default function ChatPage({ params }: ChatPageProps) {
                     >
                       {/* Avatar icon */}
                       {isAssistant && (
-                        <div className="flex items-center justify-center w-8 h-8 rounded-full bg-primary/15 text-primary shrink-0 font-bold select-none">
-                          <Sparkles className="w-4 h-4" />
+                        <div className={`flex items-center justify-center w-8 h-8 rounded-full shrink-0 font-bold select-none ${
+                          isBusyMessage ? 'bg-amber-500/15 text-amber-500' : 'bg-primary/15 text-primary'
+                        }`}>
+                          {isBusyMessage ? <Clock className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
                         </div>
                       )}
 
@@ -222,23 +227,32 @@ export default function ChatPage({ params }: ChatPageProps) {
                             isAssistant
                               ? m.isError
                                 ? 'bg-rose-500/10 border-rose-500/20 text-rose-700 dark:text-rose-400'
+                                : isBusyMessage
+                                ? 'bg-amber-500/10 border-amber-500/25 text-amber-900 dark:text-amber-200'
                                 : 'bg-card border-border text-foreground'
                               : 'bg-primary text-primary-foreground border-transparent'
                           }`}
                         >
                           {isAssistant && !m.isError ? (
-                            <div className="prose dark:prose-invert max-w-none text-sm leading-relaxed prose-p:leading-relaxed prose-pre:bg-muted prose-pre:p-3 prose-pre:rounded-lg">
-                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                {m.text}
-                              </ReactMarkdown>
-                            </div>
+                            isBusyMessage ? (
+                              <div className="flex items-start gap-2.5">
+                                <Info className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                                <p className="leading-relaxed font-medium">{m.text}</p>
+                              </div>
+                            ) : (
+                              <div className="prose dark:prose-invert max-w-none text-sm leading-relaxed prose-p:leading-relaxed prose-pre:bg-muted prose-pre:p-3 prose-pre:rounded-lg">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                  {m.text}
+                                </ReactMarkdown>
+                              </div>
+                            )
                           ) : (
                             <p className="whitespace-pre-wrap leading-relaxed">{m.text}</p>
                           )}
                         </div>
 
                         {/* Citation cards and Copy triggers */}
-                        {isAssistant && !m.isError && (
+                        {isAssistant && !m.isError && !isBusyMessage && (
                           <div className="flex flex-wrap gap-2.5 items-center pl-1">
                             {/* Copy button */}
                             <Button

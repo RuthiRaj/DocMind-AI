@@ -73,72 +73,167 @@ import math
 import uuid
 
 class GroqTokenWindow:
-    """Thread-safe in-process rolling token reservation window for Groq calls with post-call settlement."""
+    """
+    Thread-safe in-process rolling token reservation window for Groq calls
+    with post-call settlement and provider telemetry synchronization.
+    """
 
     def __init__(self):
         self.reservations: Dict[str, Tuple[float, int]] = {}
+        self.provider_remaining: int | None = None
+        self.provider_limit: int | None = None
+        self.provider_reset_ts: float | None = None
         self.lock = threading.Lock()
 
-    def reserve(self, tokens: int, limit: int, window: int = 60) -> Tuple[bool, int, str]:
+    def update_provider_telemetry(self, limit: int | None, remaining: int | None, reset_seconds: float | None) -> None:
+        """Synchronizes window state with live response headers from Groq."""
+        now = time.time()
+        with self.lock:
+            if limit is not None and limit > 0:
+                self.provider_limit = limit
+            if remaining is not None:
+                self.provider_remaining = remaining
+            if reset_seconds is not None and reset_seconds >= 0:
+                self.provider_reset_ts = now + reset_seconds
+                # If provider reset is near (e.g. within 2 seconds), prune expired local reservations
+                if reset_seconds <= 2.0:
+                    cutoff = now - 2.0
+                    expired = [k for k, (ts, _) in self.reservations.items() if ts <= cutoff]
+                    for k in expired:
+                        del self.reservations[k]
+
+    def reserve(self, tokens: int, limit: int, window: int = 60, session_id: str = "") -> Tuple[bool, int, str]:
         """
         Attempt to reserve estimated tokens within a sliding window.
         Returns:
             Tuple[bool, int, str]: (is_allowed, retry_after_seconds, reservation_id)
         """
         now = time.time()
-        cutoff = now - window
+        effective_limit = max(limit, self.provider_limit or limit)
+        thread_id = threading.get_ident()
 
         with self.lock:
-            # Evict expired reservations
+            # Check if provider reset timestamp has passed
+            if self.provider_reset_ts and now >= self.provider_reset_ts:
+                # Provider window has reset — clear older reservations
+                self.reservations.clear()
+                self.provider_reset_ts = None
+
+            cutoff = now - window
             expired_keys = [k for k, (ts, _) in self.reservations.items() if ts <= cutoff]
             for k in expired_keys:
                 del self.reservations[k]
 
             used_tokens = sum(t[1] for t in self.reservations.values())
-            if used_tokens + tokens > limit:
-                if tokens > limit:
-                    # Single request exceeds the entire window capacity
-                    return False, window, ""
+            remaining_before = max(0, effective_limit - used_tokens)
 
-                # Calculate the exact timestamp when enough reservations will expire
-                # such that (used_tokens - accumulated_freed) + tokens <= limit
-                sorted_reservations = sorted(self.reservations.values(), key=lambda x: x[0])
-                accumulated_freed = 0
-                needed_ts = now
-                for ts, tok in sorted_reservations:
-                    accumulated_freed += tok
-                    if (used_tokens - accumulated_freed) + tokens <= limit:
-                        needed_ts = ts
-                        break
+            if used_tokens + tokens > effective_limit:
+                # If provider reset timestamp is known, compute exact wait time
+                if self.provider_reset_ts and self.provider_reset_ts > now:
+                    retry_after = max(1, int(math.ceil(self.provider_reset_ts - now)))
+                else:
+                    # Calculate the exact timestamp when enough reservations will expire
+                    sorted_reservations = sorted(self.reservations.values(), key=lambda x: x[0])
+                    accumulated_freed = 0
+                    needed_ts = now
+                    for ts, tok in sorted_reservations:
+                        accumulated_freed += tok
+                        if (used_tokens - accumulated_freed) + tokens <= effective_limit:
+                            needed_ts = ts
+                            break
 
-                retry_after = max(1, int(math.ceil(needed_ts + window - now)))
+                    retry_after = max(1, min(window, int(math.ceil(needed_ts + window - now))))
+
+                logger.warning(
+                    "[TOKEN_WINDOW_RESERVE] thread=%s session=%s requested=%d used=%d remaining=%d limit=%d decision=REJECTED retry_after=%ds",
+                    thread_id,
+                    session_id or "N/A",
+                    tokens,
+                    used_tokens,
+                    remaining_before,
+                    effective_limit,
+                    retry_after,
+                )
                 return False, retry_after, ""
 
             res_id = str(uuid.uuid4())
             self.reservations[res_id] = (now, tokens)
+            used_after = used_tokens + tokens
+            logger.info(
+                "[TOKEN_WINDOW_RESERVE] thread=%s session=%s requested=%d used_before=%d used_after=%d remaining=%d limit=%d decision=GRANTED res_id=%s",
+                thread_id,
+                session_id or "N/A",
+                tokens,
+                used_tokens,
+                used_after,
+                effective_limit - used_after,
+                effective_limit,
+                res_id[:8],
+            )
             return True, 0, res_id
 
-    def settle(self, reservation_id: str, actual_tokens: int | None = None) -> None:
+    def settle(self, reservation_id: str, actual_tokens: int | None = None, session_id: str = "") -> None:
         """
         Updates an active reservation with actual token usage, or releases it on failure.
         """
         if not reservation_id:
             return
 
+        thread_id = threading.get_ident()
         with self.lock:
             if reservation_id in self.reservations:
+                ts, old_tokens = self.reservations[reservation_id]
                 if actual_tokens is None or actual_tokens <= 0:
                     del self.reservations[reservation_id]
+                    used_after = sum(t[1] for t in self.reservations.values())
+                    logger.info(
+                        "[TOKEN_WINDOW_SETTLE] thread=%s session=%s res_id=%s released_reserved=%d actual=0 used_after=%d",
+                        thread_id,
+                        session_id or "N/A",
+                        reservation_id[:8],
+                        old_tokens,
+                        used_after,
+                    )
                 else:
-                    ts, _ = self.reservations[reservation_id]
                     self.reservations[reservation_id] = (ts, int(actual_tokens))
+                    used_after = sum(t[1] for t in self.reservations.values())
+                    diff = int(actual_tokens) - old_tokens
+                    logger.info(
+                        "[TOKEN_WINDOW_SETTLE] thread=%s session=%s res_id=%s reserved=%d actual=%d diff=%+d used_after=%d",
+                        thread_id,
+                        session_id or "N/A",
+                        reservation_id[:8],
+                        old_tokens,
+                        int(actual_tokens),
+                        diff,
+                        used_after,
+                    )
 
     def current_usage(self, window: int = 60) -> int:
         """Returns the current settled + reserved token sum in the sliding window."""
         now = time.time()
-        cutoff = now - window
         with self.lock:
+            if self.provider_reset_ts and now >= self.provider_reset_ts:
+                self.reservations.clear()
+                self.provider_reset_ts = None
+                return 0
+            cutoff = now - window
             return sum(tok for ts, tok in self.reservations.values() if ts > cutoff)
+
+    def get_window_load(self, limit: int, window: int = 60) -> Tuple[int, int, float]:
+        """
+        Returns (used_tokens, effective_limit, usage_ratio) within the sliding window.
+        """
+        now = time.time()
+        effective_limit = max(limit, self.provider_limit or limit)
+        with self.lock:
+            if self.provider_reset_ts and now >= self.provider_reset_ts:
+                self.reservations.clear()
+                self.provider_reset_ts = None
+            cutoff = now - window
+            used_tokens = sum(tok for ts, tok in self.reservations.values() if ts > cutoff)
+            ratio = (used_tokens / effective_limit) if effective_limit > 0 else 0.0
+            return used_tokens, effective_limit, ratio
 
 
 

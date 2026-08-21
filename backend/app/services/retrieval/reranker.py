@@ -34,10 +34,14 @@ class ScoreFusionReranker:
         Returns:
             List[Tuple[float, dict]]: Reranked candidates list.
         """
-        if not query or not candidates:
-            return candidates[:top_k]
-
-        q_terms = set(re.findall(r"\b\w+\b", query.lower()))
+        STOPWORDS = {
+            "a", "an", "the", "and", "or", "in", "on", "at", "to", "for", "with",
+            "is", "are", "was", "were", "of", "by", "from", "which", "what",
+            "where", "who", "whom", "this", "that", "these", "those", "have",
+            "has", "had", "do", "does", "did", "be", "been", "being", "both"
+        }
+        all_terms = set(re.findall(r"\b\w+\b", query.lower()))
+        q_terms = {t for t in all_terms if t not in STOPWORDS} or all_terms
 
         scored_candidates = []
         for base_score, chunk in candidates:
@@ -47,8 +51,8 @@ class ScoreFusionReranker:
             # Term overlap ratio
             overlap_ratio = len(q_terms.intersection(c_terms)) / float(len(q_terms)) if q_terms else 0.0
 
-            # Composite rerank score (70% base similarity/RRF + 30% exact term overlap boost)
-            rerank_score = (0.7 * base_score) + (0.3 * overlap_ratio)
+            # Composite rerank score (60% base similarity/RRF + 40% exact content term overlap boost)
+            rerank_score = (0.6 * base_score) + (0.4 * overlap_ratio)
             scored_candidates.append((rerank_score, chunk))
 
         scored_candidates.sort(key=lambda x: x[0], reverse=True)

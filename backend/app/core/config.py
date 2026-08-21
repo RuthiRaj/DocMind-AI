@@ -25,9 +25,9 @@ class Settings(BaseSettings):
 
     # Environment variable configurations
     GROQ_API_KEY: str
-    GROQ_MODEL: str = "llama-3.1-8b-instant"
-    GROQ_TPM_LIMIT: int = 6000  # Shared organization-level tokens-per-minute limit
-    GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET: int = 5000  # Max estimated prompt tokens before calling Groq
+    GROQ_MODEL: str = "openai/gpt-oss-20b"
+    GROQ_TPM_LIMIT: int = 8000  # Groq rolling TPM quota ceiling
+    GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET: int = 2500  # Max estimated prompt tokens before calling Groq
     GROQ_QUERY_REWRITE_RESERVE_TOKENS: int = 300  # Input/output allowance for query rewriting
     EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
     UPLOAD_DIRECTORY: str = "uploads"
@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     # Internal mapped config settings
-    LLM_MODEL: str = "llama-3.1-8b-instant"
+    LLM_MODEL: str = "openai/gpt-oss-20b"
     DEFAULT_TOP_K: int = 25
 
     # PDF Upload Configuration Settings
@@ -60,9 +60,11 @@ class Settings(BaseSettings):
     VECTOR_DISTANCE: str = "cosine"  # Metric distance measurement algorithm
 
     # Semantic Retrieval Engine Configuration Settings
-    MAX_TOP_K: int = 30  # Maximum allowed chunks to retrieve in a single query
+    DEFAULT_TOP_K: int = 30  # Default candidate chunks to retrieve per search query
+    INITIAL_RETRIEVAL_TOP_K: int = 35  # Generous candidate pool pulled prior to reranking & token-budget trimming
+    MAX_TOP_K: int = 50  # Maximum allowed chunks to retrieve in a single query
     MIN_SIMILARITY_SCORE: float = 0.40  # Minimum vector similarity threshold score
-    ADAPTIVE_SCORE_DROP_LIMIT: float = 0.20  # Limit cutoff difference for adaptive top-k pruning
+    ADAPTIVE_SCORE_DROP_LIMIT: float = 0.45  # Limit cutoff difference for adaptive top-k pruning (preserves diverse multi-match candidates)
     MAX_QUERY_LENGTH: int = 2000  # Maximum length of user query query string to prevent resource exhaustion
     ENABLE_NEIGHBOR_MERGING: bool = True  # Enable adjacent chunk merging
     MAX_MERGED_CHUNKS: int = 2  # Max consecutive chunks allowed in a merged block
@@ -74,8 +76,9 @@ class Settings(BaseSettings):
     RRF_K: int = 60  # Reciprocal Rank Fusion constant
     RRF_FUSED_SCORE_FLOOR: float = 0.45  # Score floor for top hybrid RRF matches
     ENABLE_RERANKER: bool = True  # Enable cross-scoring reranking pass
-    RERANKER_TOP_K: int = 10  # Maximum candidate chunks to retain after reranking
-    ENABLE_SELECTIVE_QUERY_REWRITING: bool = True  # Selectively trigger LLM query expansion
+    RERANKER_TOP_K: int = 35  # Maximum candidate chunks to retain after reranking
+    ENABLE_SELECTIVE_QUERY_REWRITING: bool = False  # Enable selective query rewriting filter
+    ENABLE_BM25_SEARCH: bool = True  # Enable BM25 lexical keyword search alongside vector search
     REWRITE_MIN_WORD_COUNT: int = 5  # Minimum word count required to trigger query rewriter LLM
     QUERY_REWRITE_TIMEOUT_SECONDS: int = 10  # Timeout in seconds for query rewrite LLM call
     QUERY_REWRITE_MAX_TOKENS: int = 100  # Max completion tokens for query rewriter
@@ -85,25 +88,28 @@ class Settings(BaseSettings):
     # AI Chat (RAG) Engine Configuration Settings
     LLM_PROVIDER: str = "groq"  # Default large language model API provider
     LLM_TEMPERATURE: float = 0.2  # Control generation determinism
-    LLM_MAX_TOKENS: int = 1024  # Maximum completion token length
-    GROQ_PREFLIGHT_HEADROOM_FLOOR: int = 1500  # Minimum token headroom floor for prompt assembly
-    GROQ_COMPLETION_RESERVE_TOKENS: int = 256  # Reserve tokens allocated for completion generation
+    LLM_MAX_TOKENS: int = 512  # Maximum completion token length
+    GROQ_PREFLIGHT_HEADROOM_FLOOR: int = 1000  # Minimum token headroom floor for prompt assembly
+    GROQ_COMPLETION_RESERVE_TOKENS: int = 512  # Reserve tokens allocated for completion generation
+    GROQ_MAX_QUEUE_WAIT_SECONDS: float = 25.0  # Maximum seconds to queue in-memory before returning 429
+    GROQ_SOFT_CAP_RATIO: float = 0.85  # Soft cap threshold (85% of token window) to return graceful busy message
+    GROQ_BUSY_MESSAGE: str = "This demo is currently busy with other visitors — please try again in about a minute."
+    ENABLE_RESPONSE_CACHE: bool = True  # Enable in-memory LRU response caching for identical/repeated queries
+    RESPONSE_CACHE_MAX_ENTRIES: int = 200  # Maximum cached query entries per server process
     CONTEXT_TRIM_DECAY_RATE: float = 0.9  # Truncation ratio applied during iterative context trimming
-    MAX_CONTEXT_CHUNKS: int = 5  # Maximum number of document chunks allowed in prompt context
-    MAX_CONTEXT_CHARACTERS: int = 4500  # Upper context size characters limit
-    MAX_CONTEXT_LENGTH: int = 4500  # Configurable upper context character limit
+    MAX_CONTEXT_CHUNKS: int = 30  # Maximum number of document chunks allowed in prompt context (supports comprehensive multi-matches)
+    MAX_CONTEXT_CHARACTERS: int = 24000  # Upper context size characters limit
+    MAX_CONTEXT_LENGTH: int = 24000  # Configurable upper context character limit
     LLM_TIMEOUT: int = 30  # Timeout threshold in seconds for API completions call
     CHAT_VERSION: str = "1.0"  # Chat engine version identifier
     SYSTEM_PROMPT_VERSION: str = "1.0"  # Core system prompt version
     ENABLE_TOKEN_ESTIMATION: bool = True  # Enable estimated token metrics tracking
     ENABLE_REQUEST_LOGGING: bool = True  # Observability logger flag
 
-    # Hybrid Context Strategy Settings
-    MODEL_CONTEXT_WINDOW: int = 131072  # llama-3.1-8b-instant context window in tokens
-    ENABLE_FULL_CONTEXT_ROUTING: bool = False  # Default to RAG retrieval mode; FULL_CONTEXT must be explicitly enabled
-    FULL_CONTEXT_MAX_CHARS: int = 10000  # Max document chars for full-context mode under Groq TPM limits
-    CONVERSATION_MAX_TURNS: int = 4  # Max conversation turns to keep in memory per session
-    CONVERSATION_MAX_TOKENS: int = 1500  # Token budget reserved for conversation history
+    # Context & Memory Configuration Settings
+    MODEL_CONTEXT_WINDOW: int = 131072  # Model context window in tokens
+    CONVERSATION_MAX_TURNS: int = 2  # Max conversation turns to keep in memory per session (capped to prevent compounding token growth)
+    CONVERSATION_MAX_TOKENS: int = 350  # Token budget reserved for conversation history
 
     # API Rate Limiting Configuration Settings
     GENERAL_REQUEST_LIMIT: int = 100  # Default general request limit per client IP
