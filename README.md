@@ -1,131 +1,342 @@
 # DocMind AI
 
-> **Ask questions, get grounded answers with page citations — not guesses.**
+> **A reliability-focused, full-stack Retrieval-Augmented Generation (RAG) system for complex documents with deterministic page citations and reasoning-aware token budgeting.**
 
-DocMind AI is a full-stack Retrieval-Augmented Generation (RAG) application that lets you upload a PDF and ask natural-language questions about it. Every answer is grounded in the actual document content and cited back to the exact page it came from — no hallucinated facts, no ungrounded guessing.
+DocMind AI is a production-style RAG application built to bridge the gap between simple tutorial chatbots and robust document QA systems. Instead of naively dumping document text into an LLM context window, DocMind AI implements a bounded, resilient architecture featuring **hybrid dense/lexical retrieval**, **character-interval citation grounding**, **dynamic token budgeting**, **thread-safe rate-limit arbitration**, and **in-memory response caching**.
 
-Built as a production-style backend: hybrid retrieval (dense + lexical search), token-budget-aware LLM orchestration, thread-safe rate limiting, response caching, and graceful degradation under load — not just a weekend prototype.
-
----
-
-<p align="center">
-  <img src="docs/assets/chat_preview.png" alt="DocMind AI Chat Interface with Citations" width="850">
-</p>
-
----
-
-## ✨ Features
-
-- **PDF Ingestion & Smart Chunking** — PyMuPDF extraction with paragraph-aware chunk boundaries and page metadata preserved throughout the pipeline.
-- **Hybrid Retrieval** — Combines dense vector search (FAISS + `BAAI/bge-small-en-v1.5` embeddings) with lexical BM25 keyword search, merged via Reciprocal Rank Fusion (RRF).
-- **Grounded, Cited Answers** — Every response traces back to the exact source page(s) it was generated from, shown as interactive citation badges in the UI.
-- **Bounded Multi-Turn Chat** — Conversation history is capped (2 turns / 350 tokens) so multi-turn sessions never silently blow past API rate limits.
-- **Dynamic Completion Budgeting** — The token budget for each answer scales with question complexity (768 / 1,536 / 3,072 tokens) based on how much context retrieval actually pulled in, so broad synthesis questions get enough room to finish and narrow ones don't waste quota.
-- **Response Caching** — Repeated or near-identical questions are served from an in-memory LRU cache in under 5ms, with zero additional API cost.
-- **Graceful Load Handling** — Under heavy concurrent traffic, the app returns a fast, friendly "busy" message instead of hanging or throwing raw errors.
-- **Fully Async Backend** — LLM calls are offloaded to a thread pool so the API event loop never blocks under load.
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.111.0-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Next.js 16](https://img.shields.io/badge/Next.js-16.2-black.svg?logo=next.js&logoColor=white)](https://nextjs.org/)
+[![React 19](https://img.shields.io/badge/React-19.2-61DAFB.svg?logo=react&logoColor=black)](https://react.dev/)
+[![FAISS](https://img.shields.io/badge/FAISS-CPU_1.8-green.svg)](https://github.com/facebookresearch/faiss)
+[![Groq](https://img.shields.io/badge/Groq-gpt--oss--20b-orange.svg)](https://groq.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
-## 🏗️ How It Works
+## Overview
+
+Most RAG demonstrations work well on small sample texts with unconstrained API allowances. However, when applied to dense technical PDFs and strict API quotas, typical implementations encounter severe reliability problems:
+
+- **Lexical Blindness**: Pure vector search often fails to match precise technical terms, acronyms, and product codes.
+- **Hallucinated Citations**: Relying on the LLM to output page numbers produces fabricated references.
+- **Completion Truncation**: Reasoning-capable models allocate tokens toward internal thinking, causing fixed token budgets to cut off answers mid-sentence.
+- **Rate-Limit Cascades**: Concurrent requests quickly exhaust rolling Token-Per-Minute (TPM) limits, failing user sessions with HTTP 429 errors.
+- **Compounding History**: Unmanaged multi-turn conversation memory inflates prompt token size rapidly.
+
+DocMind AI was built as an engineering project to address these specific constraints through a disciplined, bounded architecture.
+
+---
+
+## Key Features
+
+- **Hybrid Dense & Lexical Search**: Combines dense semantic vector search (`BAAI/bge-small-en-v1.5` with FAISS `IndexFlatIP`) and sparse keyword matching (BM25 Okapi) fused via Reciprocal Rank Fusion ($RRF\_K=60$).
+- **Deterministic Page Citations**: Maps exact character offsets to page numbers during PDF extraction; citations are constructed directly from surviving retrieved chunk metadata rather than generated by the LLM.
+- **Adaptive Token Budgeting**: 3-tier dynamic completion budget (768 / 1,536 / 3,072 tokens) based on retrieved context volume to accommodate reasoning model headroom.
+- **Rate-Limit & Queue Arbitration**: In-process sliding token window with pre-call reservation, post-call actual usage settlement, in-memory queue wait (up to 25s), and an 85% soft-cap returning polite HTTP 200 busy messages.
+- **In-Memory LRU Response Cache**: 200-entry capacity cache with question normalization to serve identical repeated questions instantly without downstream API calls.
+- **Bounded Conversation Memory**: Strict 2-turn / 350-token window per session to prevent context bloat.
+- **Defensive API Validation**: Magic-byte (`%PDF`) inspection, 20 MB size ceilings, path traversal sanitization, and security headers.
+
+---
+
+## Why This Architecture
+
+DocMind AI is structured specifically to resolve the core engineering challenges of document question answering:
+
+| Challenge | Typical Naive Approach | DocMind AI Approach |
+| :--- | :--- | :--- |
+| **Retrieval Accuracy** | Vector-only cosine similarity | **Hybrid RRF ($k=60$) + Reranker**: Dense semantic embeddings paired with BM25 Okapi lexical scoring and score-drop filtering. |
+| **Citation Grounding** | Prompts LLM to write page numbers or uses regex on text | **Ingestion-Time Mapping**: Character-to-page interval lookup in `pages.json`; citations link directly to surviving chunks. |
+| **Reasoning Model Budgets** | Fixed output token limits (e.g. 512 tokens) | **Dynamic Tier Allocation**: Scales completion budget (768, 1,536, or 3,072 tokens) based on context volume. |
+| **Provider Rate Limits** | Unmanaged calls resulting in HTTP 429 exceptions | **Sliding Token Window + Queue**: In-memory reservation, 25s queue hold, and 85% soft-cap returning friendly busy status. |
+| **Multi-Turn Growth** | Unbounded history appending | **Bounded Memory + Preflight Trimming**: 2-turn / 350-token cap; trims history before dropping context chunks. |
+| **Repeated Queries** | Every duplicate query calls LLM API | **Normalized LRU Cache**: Canonical question normalization returns cached responses with zero API calls. |
+
+---
+
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                   Frontend (Next.js)                    │
-│        Upload → Dashboard → Chat UI with citations      │
-└─────────────────────────────────────────────────────────┘
-                            │
-                   POST /chat/{doc_id}
-                            ▼
-┌─────────────────────────────────────────────────────────┐
-│                    FastAPI Backend                      │
-│                                                         │
-│ 1. Check response cache → instant hit? return in <5ms   │
-│ 2. Check token headroom → near limit? friendly busy msg │
-│ 3. Hybrid retrieval → FAISS (dense) + BM25 (lexical)    │
-│    merged via Reciprocal Rank Fusion (RRF)              │
-│ 4. Assemble prompt within token budget (history + chunks│
-│ 5. Size the completion budget to question complexity    │
-│    (768 / 1,536 / 3,072 tokens — narrow vs. broad)      │
-│ 6. Call LLM (openai/gpt-oss-20b via Groq) in a worker   │
-│    thread — event loop stays responsive                 │
-│ 7. Return grounded answer with page-level citations     │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            Frontend (Next.js 16)                            │
+│  App Router · React 19 · TanStack Query · Tailwind CSS · React-Markdown    │
+│  Synchronous isSendingRef Guard · Modal Source Viewer · Toast System        │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │ POST /chat/{document_id}
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            FastAPI Backend (Async)                          │
+│                                                                             │
+│  1. RateLimitMiddleware (Client IP Sliding Window: 30 expensive / 100 gen)  │
+│  2. Security Headers (nosniff, DENY, strict-origin-when-cross-origin)       │
+│  3. Response Cache Lookup (Normalized query, in-memory LRU hit)             │
+│  4. Soft Concurrency Cap (Window load >= 85% -> Friendly HTTP 200 busy msg) │
+│  5. Session Store (Bounded memory: 2 turns / 350 tokens max)                │
+│  6. Hybrid Retrieval (FAISS Dense + BM25 Lexical + RRF Fusion + Reranking)  │
+│  7. Context Assembly & Bounding (Max 10 chunks / 10,000 chars)              │
+│  8. Preflight Budget Trimming (Sheds history first; prompt <= 2,500 tokens) │
+│  9. Dynamic Completion Budget (768 / 1,536 / 3,072 tokens based on context) │
+│ 10. GroqTokenWindow Reservation & In-Memory Wait Queue (Up to 25s)          │
+│ 11. LLM Generation via Groq SDK in Worker Thread (asyncio.to_thread)        │
+│ 12. Response Classification (finish_reason & substantive regex validation) │
+│ 13. Token Settlement & Provider Telemetry Header Sync (reset_tokens)        │
+│ 14. Deterministic Citation Construction (Exclusively from surviving chunks) │
+│ 15. Atomic Telemetry Persistence (chat_statistics.json, debug_info.json)    │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-> **Why step 5 matters**: `openai/gpt-oss-20b` is a reasoning model — it "thinks" internally before writing its final answer, and both the thinking and the answer share one token budget. A narrow question needs far less room than a broad one like *"Explain the complete architecture of X."* Instead of one fixed budget that's wrong for one end of that range, the completion budget scales with how much context retrieval pulled in, so broad synthesis questions get enough room to finish.
+---
+
+## Retrieval Pipeline
+
+The retrieval pipeline processes queries through a deterministic multi-stage funnel:
+
+1. **Dense Vector Search**: Generates 384-dimensional normalized embeddings using `BAAI/bge-small-en-v1.5` and queries a local FAISS `IndexFlatIP` inner-product index.
+2. **Lexical Keyword Search**: Queries an in-memory BM25 Okapi index ($k_1=1.5, b=0.75$) built across the document chunks.
+3. **Reciprocal Rank Fusion (RRF)**: Merges dense and lexical results using rank positions:
+   $$\text{Score}_{\text{RRF}}(d) = \frac{1}{60 + \text{Rank}_{\text{dense}}(d)} + \frac{1}{60 + \text{Rank}_{\text{BM25}}(d)}$$
+4. **Composite Reranking**: Applies a `ScoreFusionReranker` combining $60\%$ RRF rank score with $40\%$ query-term overlap.
+5. **Adaptive Score Pruning**: Filters out candidates scoring below $(\text{Score}_{\max} - 0.45)$, discarding irrelevant chunks while retaining diverse multi-section context.
+6. **Bounded Neighbor Merging**: Adjacent chunks from the same section are merged only if they have consecutive chunk indices and page overlap, capped at a maximum of 2 chunks and $\le 1,500$ total characters.
 
 ---
 
-## 🧱 Tech Stack
+## Citation Architecture
 
-- **Backend**: Python 3.12+, FastAPI, PyMuPDF, Sentence-Transformers, FAISS, BM25, Groq SDK, Pydantic
-- **Frontend**: Next.js 16 (App Router), React 19, TanStack Query, Tailwind CSS, React-Markdown
+DocMind AI implements **deterministic citation grounding** by tracking physical PDF page coordinates at ingestion time:
+
+1. **Character Interval Recording**: During PDF extraction with PyMuPDF, each page's start and end character positions are recorded in `pages.json`:
+   ```json
+   [
+     {"page": 1, "start_character": 0, "end_character": 1240},
+     {"page": 2, "start_character": 1241, "end_character": 2680}
+   ]
+   ```
+2. **Chunk Interval Association**: When chunks are created, their `start_character` and `end_character` offsets are compared against `pages.json` intervals to assign precise `start_page` and `end_page` properties.
+3. **Metadata-Driven Badge Construction**: Citations returned in `ChatResponse` are constructed exclusively from the surviving retrieved chunks passed into context.
+4. **No LLM Citation Generation**: The LLM is never asked to generate page numbers, and the system never extracts citations via regex parsing of the model output. This guarantees that cited pages correspond strictly to retrieved text.
 
 ---
 
-## 🚀 Quick Start
+## Token & Context Management
 
-### 1. Clone the repo
+To maintain predictable operational costs and avoid exceeding provider prompt limits, DocMind AI manages token allocations dynamically:
 
+### Preflight Context Bounding
+- Prompt token usage is capped at approximately 2,500 tokens (`GROQ_PREFLIGHT_PROMPT_TOKEN_BUDGET`).
+- If context exceeds the budget, `_preflight_trim_for_groq()` first sheds conversation history turn-by-turn.
+- If history is empty and context still exceeds the budget, lowest-scoring retrieved chunks are pruned. The user's query question is never trimmed.
+
+### Dynamic Completion Budgeting
+The `openai/gpt-oss-20b` model requires variable output headroom for its reasoning process. DocMind AI allocates completion tokens based on retrieved context volume:
+- **Tier 1 (1–2 chunks / $\le 2,000$ chars)**: $768$ tokens
+- **Tier 2 (3–5 chunks / $2,001–5,000$ chars)**: $1,536$ tokens
+- **Tier 3 (6+ chunks / $>5,000$ chars)**: $3,072$ tokens
+
+### Truncation & Failure Classification
+- **Substantive Content Validation**: The response must contain alphanumeric text (`re.search(r"[A-Za-z0-9]", content)`).
+- **Synthesis Guidance**: If `finish_reason == "length"` occurs with zero substantive content (e.g. only bare markdown symbols `**`), the system returns actionable synthesis guidance instead of a misleading "no information found" error:
+  > *"This question involves synthesizing a substantial amount of information across the document. Please try asking a more focused question about a specific component or section."*
+- When fallback guidance is returned, citation badges are suppressed.
+
+---
+
+## Rate-Limit Handling
+
+To operate reliably under Groq's developer-tier limits (8,000 Tokens Per Minute), the backend uses a multi-layered arbitration strategy:
+
+- **Sliding Token Window (`GroqTokenWindow`)**: Thread-safe tracker maintaining a rolling 60-second window of reserved and actual token counts.
+- **Reservation & Settlement**: Before making an API request, the system reserves estimated prompt + completion tokens. After the call completes, `settle()` updates the window with actual tokens consumed reported in the API response headers, immediately releasing unused capacity.
+- **In-Memory Request Queue**: If the token window is saturated, requests queue in-process for up to 25 seconds before returning an HTTP 429 with a calculated `Retry-After` header.
+- **85% Soft Load Cap**: If current window utilization reaches or exceeds $85\%$, `ChatService` returns a friendly HTTP 200 busy response without queueing, protecting the API quota.
+- **Provider Header Synchronization**: The system inspects live `x-ratelimit-reset-tokens` headers from Groq responses to keep internal reset clocks aligned with upstream provider state.
+
+---
+
+## Caching
+
+- **In-Memory LRU Cache**: Stores up to 200 recent query responses per process.
+- **Deterministic Query Normalization**: `normalize_question()` converts text to lowercase, strips trailing punctuation, and normalizes whitespace.
+- **Document Scoping**: Cache entries are keyed by `(document_id, normalized_query)` to prevent cross-document data leakage.
+- **Fast Hits**: Cached queries return without making downstream LLM API calls or vector searches.
+- Fallback answers, rate-limit messages, and busy notices are never stored in cache.
+
+---
+
+## Security
+
+- **No Secrets in Source Control**: Verified clean Git history with zero committed credentials. `.env` and `.env.local` are untracked.
+- **Triple Upload Validation**: Verifies `.pdf` file extensions, `application/pdf` MIME headers, and `%PDF` magic bytes at the binary level. Maximum file size is strictly capped at 20 MB.
+- **Path Traversal Protection**: Document identifiers are sanitized using `Path(document_id).name` and UUID format validation.
+- **Security Headers**: Middleware injects `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: strict-origin-when-cross-origin`.
+- **Cross-Document Isolation**: Retrieval results are cross-checked against the requested `document_id`. Mismatches trigger an HTTP 403 Forbidden exception.
+
+---
+
+## Testing & Validation
+
+The backend includes 13 test suites covering unit logic, rate-limit constraints, budgeting tiers, and adversarial grounding:
+
+```bash
+cd backend
+pytest tests/test_rate_limit_and_budget.py tests/test_preflight_trimming.py tests/test_multi_chunk_synthesis.py -v
+```
+
+### Verified Test Coverage:
+- **`test_rate_limit_and_budget.py`**: Proves single LLM call per question, token window headroom math, context constraints ($\le 2,500$ tokens), conversation history limits ($\le 350$ tokens), error mapping (429 vs 401 vs 502), and BM25/RRF fusion.
+- **`test_preflight_trimming.py`**: Proves history is pruned before context chunks, lowest-scoring chunks drop first, user questions are never trimmed, and HTTP 413 is raised when the system prompt and question alone exceed limits.
+- **`test_multi_chunk_synthesis.py`**: Proves dynamic budget tiers (768/1,536/3,072), synthesis guidance on length-truncation, citation suppression on fallbacks, and bare markdown interception.
+- **`test_adversarial_grounding.py`**: 5 adversarial probes verifying outside knowledge rejection, contradiction overrides, extrapolation refusal, prompt injection defense, and leading question handling.
+- **`test_rag_architecture_integration.py`**: Invariant test suite protecting single-path RAG execution, character interval mapping, and token window settlement. *(Note: 3 assertions in this test file reference earlier prompt header strings and default feature flag settings from prior iterations; the active production logic is covered by the dedicated unit test suites).*
+
+---
+
+## Tech Stack
+
+### Backend
+- **Framework**: Python 3.12+, FastAPI, Pydantic v2, `pydantic-settings`
+- **PDF Extraction**: PyMuPDF (`fitz`)
+- **Embeddings**: `sentence-transformers` (`BAAI/bge-small-en-v1.5`), PyTorch
+- **Vector Search**: FAISS-CPU (`IndexFlatIP`)
+- **Lexical Search**: Custom BM25 Okapi + Reciprocal Rank Fusion
+- **LLM Provider**: Groq Python SDK (`openai/gpt-oss-20b`)
+- **Server**: Uvicorn (ASGI)
+
+### Frontend
+- **Framework**: Next.js 16 (App Router), React 19, TypeScript
+- **Data Management**: TanStack React Query v5
+- **Styling**: Tailwind CSS v4, Framer Motion, Lucide React
+- **Markdown**: `react-markdown`, `remark-gfm`
+- **HTTP Client**: Axios
+
+---
+
+## Project Structure
+
+```
+DocMind-AI/
+├── .gitignore
+├── LICENSE
+├── README.md
+├── docs/
+│   └── assets/
+│       └── chat_preview.png
+├── backend/
+│   ├── .env.example
+│   ├── .gitignore
+│   ├── pytest.ini
+│   ├── requirements.txt
+│   ├── app/
+│   │   ├── main.py                     # FastAPI entrypoint, middlewares, lifespan
+│   │   ├── api/
+│   │   │   ├── router.py               # Central API router aggregator
+│   │   │   └── routes/                 # chat, upload, processing, chunking, embed, index, etc.
+│   │   ├── core/
+│   │   │   ├── config.py               # Pydantic BaseSettings & drift validation
+│   │   │   ├── prompts.py              # Central grounding system prompts
+│   │   │   ├── rate_limit.py           # Sliding token window & rate limit middleware
+│   │   │   └── telemetry.py            # Log retention & live Groq quota tracking
+│   │   ├── schemas/                    # Pydantic request/response schemas
+│   │   ├── services/
+│   │   │   ├── chat/                   # GroqProvider, PromptBuilder, ResponseCache, ConversationStore
+│   │   │   ├── embeddings/             # SentenceTransformerProvider
+│   │   │   ├── indexing/               # FaissIndexProvider
+│   │   │   ├── pdf/                    # Upload, Processing, Chunking, Retrieval, Chat services
+│   │   │   └── retrieval/              # BM25Retriever, ScoreFusionReranker, QueryRewriter
+│   │   └── utils/
+│   │       └── formatters.py           # File size and number formatting
+│   ├── scripts/                        # Migration, audit, and verification scripts
+│   └── tests/                          # Comprehensive unit, integration, and regression suites
+└── frontend/
+    ├── package.json
+    ├── next.config.ts
+    ├── tsconfig.json
+    ├── app/
+    │   ├── layout.tsx                  # Root layout & providers
+    │   ├── page.tsx                    # Landing page
+    │   ├── dashboard/page.tsx          # Analytics dashboard
+    │   ├── documents/page.tsx          # Document management
+    │   ├── documents/[documentId]/pipeline/page.tsx  # Pipeline execution view
+    │   └── chat/[documentId]/page.tsx  # Interactive RAG Chat with Citation Badges
+    ├── components/                     # Reusable UI components & layouts
+    ├── hooks/                          # useChat, useDocuments, usePipeline, useHealth
+    ├── services/                       # API clients (api, chat, documents, upload, etc.)
+    └── types/                          # TypeScript interfaces (Chat, Document, Pipeline, etc.)
+```
+
+---
+
+## Setup
+
+### Prerequisites
+- **Python 3.12+**
+- **Node.js 18+** and **npm**
+- **Groq API Key** from [console.groq.com/keys](https://console.groq.com/keys)
+
+### 1. Clone Repository
 ```bash
 git clone https://github.com/Ruthiraj-Gosula/DocMind-AI.git
 cd DocMind-AI
 ```
 
-### 2. Get a free Groq API key
-
-Sign up at [console.groq.com/keys](https://console.groq.com/keys) — it's free, no credit card required.
-
-### 3. Set up the backend
-
+### 2. Backend Configuration & Launch
 ```bash
 cd backend
 cp .env.example .env
 ```
-
-Open `.env` and paste your Groq API key into `GROQ_API_KEY=`.
-
+Edit `.env` to include your Groq API key:
+```env
+GROQ_API_KEY=gsk_your_actual_groq_api_key_here
+```
+Install dependencies and run the server:
 ```bash
 pip install -r requirements.txt
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
+- API Base: `http://127.0.0.1:8000`
+- Swagger Documentation: `http://127.0.0.1:8000/docs`
 
-Backend runs at `http://127.0.0.1:8000`. Interactive API docs at `http://127.0.0.1:8000/docs`.
-
-### 4. Set up the frontend
-
+### 3. Frontend Configuration & Launch
 ```bash
 cd ../frontend
 cp .env.example .env.local
 npm install
 npm run dev
 ```
-
-Frontend runs at `http://localhost:3000`.
-
-*(Note: If `.env.local` is omitted, the frontend automatically falls back to proxying `/api/*` requests straight to `http://127.0.0.1:8000`.)*
-
-### 5. Try it out
-
-1. Open `http://localhost:3000` in your browser.
-2. Upload a PDF, wait for it to finish processing, and start asking questions!
+- Frontend Application: `http://localhost:3000`
 
 ---
 
-## ⚠️ Known Limitations
+## Known Limitations
 
-This project runs on Groq's free developer tier, which has two separate limits worth knowing about:
-
-- **Per-Minute Limit (8,000 TPM)** — Comfortably supports ~5 concurrent active users. If traffic briefly spikes above that, you'll see a friendly *"currently busy"* message instead of an answer, or a short automatic wait — this is expected behavior, not a bug.
-- **Per-Day Limit (200,000 TPD)** — A separate, cumulative daily cap. It's easy to hit this only if you do heavy, sustained testing (dozens of broad questions) in one sitting — normal demo usage won't come close. It resets gradually on a rolling 24-hour basis, not all at once at midnight.
-- **Broad Synthesis Token Consumption** — Broad *"explain everything about X"* questions cost more tokens per answer (since the model needs more room to reason through a synthesis across many chunks) than narrow, focused questions. This is handled automatically by the dynamic completion budgeting described above, but broad questions consume quota faster.
-- **Single-Document Scope** — Each chat session is scoped to a single document — cross-document search isn't currently supported.
-- **In-Memory State** — Rate limiting and response caching are in-memory per process; a multi-instance production deployment would want to back these with Redis.
-- **Self-Contained Usage** — Since you run this with your own free Groq API key, your usage and quota are completely separate from anyone else's — someone else hitting their daily limit has zero effect on you.
+- **In-Memory State**: Rate limits, token reservation windows, response caches, and session conversation memory are held in process memory. Running with multiple Uvicorn workers (`--workers > 1`) requires a shared external backend.
+- **Single-Instance Scope**: Designed and tested as a single-instance service; distributed clustering is not currently implemented.
+- **Provider Quota Constraints**: Under the Groq free developer tier (8,000 TPM / 200,000 TPD), sustained heavy query traffic will trigger the soft-cap busy response or in-memory queue.
+- **Single-Document Scope**: Chat sessions operate on one document at a time; cross-document multi-collection querying is not supported.
 
 ---
 
-## 📄 License
+## Future Scope
 
-MIT — see [LICENSE](LICENSE) for details.
+*(Planned future enhancements — not currently implemented)*
+
+- **Distributed State Adapter**: Redis-backed state store for `GroqTokenWindow`, `ResponseCache`, and `ConversationStore` to support multi-worker processes.
+- **Multi-Document Collections**: Cross-document vector indexing and federated retrieval.
+- **Asynchronous Task Queues**: Background worker integration (Celery/RQ) for large batch PDF ingestion.
+- **Visual Citation Highlighting**: PDF snippet rendering with bounding-box highlights alongside text page citations.
+
+---
+
+## Author
+
+**Ruthiraj Gosula**
+- **GitHub**: [@Ruthiraj-Gosula](https://github.com/Ruthiraj-Gosula)
+- **Project Repository**: [DocMind-AI](https://github.com/Ruthiraj-Gosula/DocMind-AI)
+- **LinkedIn**: [Ruthiraj Gosula](https://www.linkedin.com/in/ruthiraj-gosula)
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
