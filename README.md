@@ -328,15 +328,6 @@ npm run dev
 
 ---
 
-## Author
-
-**Ruthiraj Gosula**
-- **GitHub**: [@Ruthiraj-Gosula](https://github.com/Ruthiraj-Gosula)
-- **Project Repository**: [DocMind-AI](https://github.com/Ruthiraj-Gosula/DocMind-AI)
-- **LinkedIn**: [Ruthiraj Gosula](https://www.linkedin.com/in/ruthiraj-gosula)
-
----
-
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
